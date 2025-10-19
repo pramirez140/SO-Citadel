@@ -1,0 +1,18 @@
+# Build artifacts
+obj/
+*.o
+maester
+
+# IDE
+.vscode/
+
+# Runtime folders
+dragonmont/
+
+# Mac OS
+.DS_Store
+
+# Test files
+S0.c
+S1.c
+S2.c
