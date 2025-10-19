@@ -6,9 +6,6 @@ maester
 # IDE
 .vscode/
 
-# Runtime folders
-dragonmont/
-
 # Mac OS
 .DS_Store
 
