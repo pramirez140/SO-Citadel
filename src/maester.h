@@ -10,17 +10,18 @@ typedef struct {
     int  port;
 } Route;
 
-typedef struct {
+typedef struct Maester {
     char realm_name[50];
     char folder_path[200];
     int  num_envoys;
     char ip[20];
     int  port;
+    int  socket_fd;
     Route*   routes;
-    int num_routes;
+    int      num_routes;
     Product* stock;
-    int num_products;
-} Maester;
+    int      num_products;
+ } Maester;
 
 
 Maester* create_maester(const char* realm_name, const char* folder_path, const char* ip, int port);
@@ -34,10 +35,11 @@ Maester* load_maester_config(const char* config_file, const char* stock_file);
 // Command handlers for Phase 1
 void cmd_list_realms(Maester* maester);
 void cmd_list_products(Maester* maester, const char* realm);
-void cmd_start_trade(Maester* maester, const char* realm);
 void cmd_pledge(Maester* maester, const char* realm, const char* sigil);
 void cmd_pledge_respond(Maester* maester, const char* realm, const char* response);
 void cmd_pledge_status(Maester* maester);
 void cmd_envoy_status(Maester* maester);
+// Runs the Maester
+int maester_run(const char* config_file, const char* stock_file);
 
 #endif

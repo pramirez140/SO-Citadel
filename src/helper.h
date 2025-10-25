@@ -15,6 +15,8 @@ void my_strcpy(char *dest, const char *src);
 void str_tolower(char *dest, const char *src);
 void int_to_str(int num, char *buffer);
 void str_append(char *dest, const char *src);
+int  read_line_fd(int fd, char *buffer, int max_len);
+void clean_realm_name(char *name);
 
 // Error handling
 void die(char *msg);

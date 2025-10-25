@@ -4,7 +4,23 @@
 #include <stdlib.h>
 
 Product* load_stock(const char* filename, int* num_products) {
-    int fd = open(filename, O_RDONLY);
+    char path[512];
+    int has_slash = 0;
+    for (int i = 0; filename[i] != '\0'; i++) {
+        if (filename[i] == '/') { 
+            has_slash = 1;
+            break; 
+        }
+    }
+
+    if (has_slash) {
+        my_strcpy(path, filename);
+    } else {
+        my_strcpy(path, "data/");
+        str_append(path, filename);
+    }
+
+    int fd = open(path, O_RDONLY);
     if (fd < 0) {
         write_str(STDERR_FILENO, "Error: Cannot open stock database file ");
         write_str(STDERR_FILENO, filename);

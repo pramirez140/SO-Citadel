@@ -120,3 +120,24 @@ void die(char *msg){
     write_str(STDERR_FILENO, msg);
     exit(1);
 }
+
+int read_line_fd(int fd, char *buffer, int max_len) {
+    int i = 0; char c;
+    while (i < max_len - 1) {
+        ssize_t n = read(fd, &c, 1);
+        if (n <= 0) break;
+        if (c == '\n') break;
+        if (c != '\r') buffer[i++] = c; // ignore CR
+    }
+    buffer[i] = '\0';
+    return i;
+}
+
+void clean_realm_name(char *name) {
+    int i = 0, j = 0;
+    while (name[i] != '\0') {
+        if (name[i] != '&') name[j++] = name[i];
+        i++;
+    }
+    name[j] = '\0';
+}
