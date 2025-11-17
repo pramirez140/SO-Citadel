@@ -1,6 +1,11 @@
 #ifndef MAESTER_H
 #define MAESTER_H
 
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include "stock.h"
 #include "helper.h"
 

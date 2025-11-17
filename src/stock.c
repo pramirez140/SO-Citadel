@@ -1,7 +1,4 @@
 #include "stock.h"
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdlib.h>
 
 Product* load_stock(const char* filename, int* num_products) {
     char path[512];

@@ -1,25 +1,5 @@
 #include "trade.h"
-#include "helper.h"
-#include "stock.h"
-#include "maester.h"
-
-#include <fcntl.h>
-#include <unistd.h>
-#include <errno.h>
-
-// ------- realm stock loader -------
-Product* trade_load_realm_stock(const char* realm, int* num_products) {
-    char filename[300];
-    my_strcpy(filename, "data/realm_stock/");
-
-    // filename uses lowercase realm
-    char realm_lower[100];
-    str_tolower(realm_lower, realm);
-    str_append(filename, realm_lower);
-    str_append(filename, "_stock.db");
-
-    return load_stock(filename, num_products);
-}
+#include "trade.h"
 
 typedef struct {
     char product_name[100];
@@ -33,20 +13,16 @@ void cmd_start_trade(struct Maester* maester, const char* realm) {
     write_str(STDOUT_FILENO, realm);
     write_str(STDOUT_FILENO, ".\n");
 
-    int num_products = 0;
-    Product* realm_stock = trade_load_realm_stock(realm, &num_products);
-
-    if (!realm_stock || num_products == 0) {
-        write_str(STDOUT_FILENO, "No products available from this realm.\n");
-        if (realm_stock) free_stock(realm_stock);
+    if (maester->num_products == 0 || maester->stock == NULL) {
+        write_str(STDOUT_FILENO, "Your inventory is empty. Nothing to trade.\n");
         return;
     }
 
     // Show available products
     write_str(STDOUT_FILENO, "Available products: ");
-    for (int i = 0; i < num_products; i++) {
-        write_str(STDOUT_FILENO, realm_stock[i].name);
-        if (i < num_products - 1) write_str(STDOUT_FILENO, ", ");
+    for (int i = 0; i < maester->num_products; i++) {
+        write_str(STDOUT_FILENO, maester->stock[i].name);
+        if (i < maester->num_products - 1) write_str(STDOUT_FILENO, ", ");
     }
     write_str(STDOUT_FILENO, ".\n");
 
@@ -61,7 +37,6 @@ void cmd_start_trade(struct Maester* maester, const char* realm) {
         if (bytes_read < 0) {
             if (errno == EINTR) {
                 write_str(STDOUT_FILENO, "\nTrade cancelled.\n");
-                free_stock(realm_stock);
                 return;
             }
             break;
@@ -88,6 +63,10 @@ void cmd_start_trade(struct Maester* maester, const char* realm) {
 
         // send -> write file and exit
         if (my_strcasecmp(tokens[0], "send") == 0) {
+            if (item_count == 0) {
+                write_str(STDOUT_FILENO, "Cannot send an empty trade. Add items first.\n");
+                continue;
+            }
             char filename[256];
             my_strcpy(filename, maester->folder_path);
             str_append(filename, "/trade_");
@@ -115,14 +94,12 @@ void cmd_start_trade(struct Maester* maester, const char* realm) {
             } else {
                 write_str(STDOUT_FILENO, "Error: Could not save trade list.\n");
             }
-            free_stock(realm_stock);
             break;
         }
 
         // cancel -> exit
         if (my_strcasecmp(tokens[0], "cancel") == 0) {
             write_str(STDOUT_FILENO, "Trade cancelled.\n");
-            free_stock(realm_stock);
             break;
         }
 
@@ -139,9 +116,11 @@ void cmd_start_trade(struct Maester* maester, const char* realm) {
                 }
 
                 int found = 0, available = 0;
-                for (int k = 0; k < num_products; k++) {
-                    if (my_strcasecmp(product_name, realm_stock[k].name) == 0) {
-                        found = 1; available = realm_stock[k].amount; break;
+                for (int k = 0; k < maester->num_products; k++) {
+                    if (my_strcasecmp(product_name, maester->stock[k].name) == 0) {
+                        found = 1;
+                        available = maester->stock[k].amount;
+                        break;
                     }
                 }
 
@@ -160,12 +139,23 @@ void cmd_start_trade(struct Maester* maester, const char* realm) {
                         int_to_str(quantity, b); write_str(STDOUT_FILENO, b);
                         write_str(STDOUT_FILENO, "\n");
                     }
-                    if (item_count < 50) {
-                        my_strcpy(shopping_list[item_count].product_name, product_name);
-                        shopping_list[item_count].quantity = quantity;
-                        item_count++;
-                    } else {
-                        write_str(STDOUT_FILENO, "Shopping cart is full!\n");
+                    int updated = 0;
+                    for (int j = 0; j < item_count; j++) {
+                        if (my_strcasecmp(shopping_list[j].product_name, product_name) == 0) {
+                            shopping_list[j].quantity += quantity;
+                            updated = 1;
+                            break;
+                        }
+                    }
+
+                    if (!updated) {
+                        if (item_count < 50) {
+                            my_strcpy(shopping_list[item_count].product_name, product_name);
+                            shopping_list[item_count].quantity = quantity;
+                            item_count++;
+                        } else {
+                            write_str(STDOUT_FILENO, "Shopping cart is full!\n");
+                        }
                     }
                 }
             } else {
@@ -189,14 +179,15 @@ void cmd_start_trade(struct Maester* maester, const char* realm) {
                 for (int j = 0; j < item_count; j++) {
                     if (my_strcasecmp(product_name, shopping_list[j].product_name) == 0) {
                         if (quantity >= shopping_list[j].quantity) {
-                            // remove entry by shifting left
-                            for (int k = j; k < item_count - 1; k++)
+                            for (int k = j; k < item_count - 1; k++) {
                                 shopping_list[k] = shopping_list[k + 1];
+                            }
                             item_count--;
                         } else {
                             shopping_list[j].quantity -= quantity;
                         }
-                        removed = 1; break;
+                        removed = 1;
+                        break;
                     }
                 }
                 if (!removed) {

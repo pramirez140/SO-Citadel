@@ -1,12 +1,5 @@
 #include "maester.h"
 #include "trade.h"
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <errno.h>
-#include <signal.h>
 
 #define MAX_LINE_LENGTH 256
 
@@ -140,53 +133,51 @@ Maester* load_maester_config(const char* config_file, const char* stock_file) {
     // Create folder if it doesn't exist (mkdir with 0755 permissions)
     mkdir(folder_path, 0755);  // Ignore error if folder already exists
 
-    // Read "--- ROUTES ---" line
+    // Read "--- ROUTES ---" marker
     if (read_line_fd(fd, line, MAX_LINE_LENGTH) <= 0) {
         close(fd);
         free_maester(maester);
         return NULL;
     }
+    if (my_strcasecmp(line, "--- ROUTES ---") != 0) {
+        write_str(STDERR_FILENO, "Warning: Expected '--- ROUTES ---' section\n");
+    }
 
-    // Read routes
-    if (read_line_fd(fd, line, MAX_LINE_LENGTH) <= 0) {
-        // Parse: realm ip port
-        char route_realm[50];
-        char route_ip[20];
-        int route_port = 0;
-
-        // Simple parsing: find spaces
-        int i = 0, j = 0;
-
-        // Get realm name
-        while (line[i] != ' ' && line[i] != '\0') {
-            route_realm[j++] = line[i++];
+    // Read routes until EOF
+    while (1) {
+        int len = read_line_fd(fd, line, MAX_LINE_LENGTH);
+        if (len <= 0) {
+            break;
         }
-        route_realm[j] = '\0';
-
-        // Skip spaces
-        while (line[i] == ' ') i++;
-
-        // Get IP
-        j = 0;
-        while (line[i] != ' ' && line[i] != '\0') {
-            route_ip[j++] = line[i++];
+        if (line[0] == '\0') {
+            continue;
         }
-        route_ip[j] = '\0';
 
-        // Skip spaces
-        while (line[i] == ' ') i++;
+        char token[3][50];
+        int token_count = 0;
+        int i = 0;
 
-        // Get port
-        char port_str[20];
-        j = 0;
-        while (line[i] != '\0') {
-            port_str[j++] = line[i++];
+        while (line[i] != '\0' && token_count < 3) {
+            while (line[i] == ' ' || line[i] == '\t') {
+                i++;
+            }
+            if (line[i] == '\0') {
+                break;
+            }
+            int j = 0;
+            while (line[i] != '\0' && line[i] != ' ' && line[i] != '\t') {
+                token[token_count][j++] = line[i++];
+            }
+            token[token_count][j] = '\0';
+            token_count++;
         }
-        port_str[j] = '\0';
-        route_port = str_to_int(port_str);
 
-        // Add route
-        add_route(maester, route_realm, route_ip, route_port);
+        if (token_count < 3) {
+            continue;
+        }
+
+        int route_port = str_to_int(token[2]);
+        add_route(maester, token[0], token[1], route_port);
     }
 
     close(fd);
@@ -222,6 +213,7 @@ void cmd_list_realms(Maester* maester) {
     if (maester == NULL) return;
 
     write_str(STDOUT_FILENO, "Known Realms:\n");
+    int printed = 0;
     for (int i = 0; i < maester->num_routes; i++) {
         // Skip DEFAULT - it's not a realm, it's the default route
         if (my_strcasecmp(maester->routes[i].realm, "DEFAULT") == 0) {
@@ -236,43 +228,24 @@ void cmd_list_realms(Maester* maester) {
             write_str(STDOUT_FILENO, " (route unknown)");
         }
         write_str(STDOUT_FILENO, "\n");
+        printed = 1;
+    }
+    if (!printed) {
+        write_str(STDOUT_FILENO, "  (none)\n");
     }
 }
 
 void cmd_list_products(Maester* maester, const char* realm) {
     if (maester == NULL) return;
 
-    // Phase 1: Only implement listing our own products (without realm)
     if (realm == NULL || my_strlen(realm) == 0) {
-        // Fully implemented for Phase 1 - use stock.c function
         print_products(maester->num_products, maester->stock);
-    } else {
-        // Phase 1: Load products from realm's database file
-        write_str(STDOUT_FILENO, "Listing products from ");
-        write_str(STDOUT_FILENO, realm);
-        write_str(STDOUT_FILENO, ":\n");
-
-        int num_products = 0;
-        Product* realm_stock = trade_load_realm_stock(realm, &num_products);
-
-        if (realm_stock != NULL && num_products > 0) {
-            // Display products in simple numbered list
-            for (int i = 0; i < num_products; i++) {
-                char num_buf[20];
-                int_to_str(i + 1, num_buf);
-                write_str(STDOUT_FILENO, num_buf);
-                write_str(STDOUT_FILENO, ". ");
-                write_str(STDOUT_FILENO, realm_stock[i].name);
-                write_str(STDOUT_FILENO, " (");
-                int_to_str(realm_stock[i].amount, num_buf);
-                write_str(STDOUT_FILENO, num_buf);
-                write_str(STDOUT_FILENO, " units)\n");
-            }
-            free_stock(realm_stock);
-        } else {
-            write_str(STDOUT_FILENO, "No products available from this realm.\n");
-        }
+        return;
     }
+
+    write_str(STDOUT_FILENO, "ERROR: You must have an alliance with ");
+    write_str(STDOUT_FILENO, realm);
+    write_str(STDOUT_FILENO, " to trade.\n");
 }
 
 void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {

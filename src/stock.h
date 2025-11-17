@@ -1,6 +1,8 @@
 #ifndef STOCK_H
 #define STOCK_H
 
+#include <fcntl.h>
+#include <unistd.h>
 #include "helper.h"
 
 typedef struct {
