@@ -1,7 +1,21 @@
 #include "maester.h"
 #include "trade.h"
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #define MAX_LINE_LENGTH 256
+
+static void maester_reset_active_mission(Maester* maester);
+static int  set_socket_nonblocking(int fd);
+static int  maester_setup_listener(Maester* maester);
+static void maester_accept_placeholder(Maester* maester);
+static void maester_event_loop(Maester* maester);
 
 Maester* create_maester(const char* realm_name, const char* folder_path, const char* ip, int port) {
     Maester* maester = (Maester*)malloc(sizeof(Maester));
@@ -24,6 +38,26 @@ Maester* create_maester(const char* realm_name, const char* folder_path, const c
     maester->num_routes = 0;
     maester->stock = NULL;
     maester->num_products = 0;
+    maester->alliances = NULL;
+    maester->num_alliances = 0;
+    maester->envoy_missions = NULL;
+    maester->connections = NULL;
+    maester->num_connections = 0;
+    maester->listen_fd = -1;
+    maester->listener_thread = 0;
+    maester->shutting_down = 0;
+    maester->outbound_queue.buffer = NULL;
+    maester->outbound_queue.capacity = 0;
+    maester->outbound_queue.count = 0;
+    maester->outbound_queue.head = 0;
+    maester->outbound_queue.tail = 0;
+    pthread_mutex_init(&maester->routes_lock, NULL);
+    pthread_mutex_init(&maester->alliances_lock, NULL);
+    pthread_mutex_init(&maester->envoys_lock, NULL);
+    pthread_mutex_init(&maester->connections_lock, NULL);
+    pthread_mutex_init(&maester->outbound_queue.lock, NULL);
+    pthread_cond_init(&maester->outbound_queue.cond, NULL);
+    maester_reset_active_mission(maester);
 
     return maester;
 }
@@ -81,9 +115,9 @@ Maester* load_maester_config(const char* config_file, const char* stock_file) {
     }
 
     char line[MAX_LINE_LENGTH];
-    char realm_name[50];
-    char folder_path[200];
-    char ip[20];
+    char realm_name[REALM_NAME_MAX];
+    char folder_path[PATH_MAX_LEN];
+    char ip[IP_ADDR_MAX];
     int num_envoys = 0;
     int port = 0;
 
@@ -129,6 +163,21 @@ Maester* load_maester_config(const char* config_file, const char* stock_file) {
         return NULL;
     }
     maester->num_envoys = num_envoys;
+    if (maester->num_envoys > 0) {
+        maester->envoy_missions = (EnvoyMission*)calloc(maester->num_envoys, sizeof(EnvoyMission));
+        if (maester->envoy_missions == NULL) {
+            close(fd);
+            free_maester(maester);
+            return NULL;
+        }
+        for (int i = 0; i < maester->num_envoys; i++) {
+            maester->envoy_missions[i].type = ENVOY_TYPE_NONE;
+            maester->envoy_missions[i].status = ENVOY_STATUS_IDLE;
+            maester->envoy_missions[i].target_realm[0] = '\0';
+            maester->envoy_missions[i].payload_path[0] = '\0';
+            maester->envoy_missions[i].started_at = 0;
+        }
+    }
 
     // Create folder if it doesn't exist (mkdir with 0755 permissions)
     mkdir(folder_path, 0755);  // Ignore error if folder already exists
@@ -153,7 +202,7 @@ Maester* load_maester_config(const char* config_file, const char* stock_file) {
             continue;
         }
 
-        char token[3][50];
+        char token[3][REALM_NAME_MAX];
         int token_count = 0;
         int i = 0;
 
@@ -196,6 +245,27 @@ Maester* load_maester_config(const char* config_file, const char* stock_file) {
 void free_maester(Maester* maester) {
     if (maester == NULL) return;
 
+    if (maester->listen_fd >= 0) {
+        close(maester->listen_fd);
+        maester->listen_fd = -1;
+    }
+    if (maester->socket_fd >= 0) {
+        close(maester->socket_fd);
+        maester->socket_fd = -1;
+    }
+
+    if (maester->alliances != NULL) {
+        free(maester->alliances);
+    }
+
+    if (maester->envoy_missions != NULL) {
+        free(maester->envoy_missions);
+    }
+
+    if (maester->connections != NULL) {
+        free(maester->connections);
+    }
+
     if (maester->routes != NULL) {
         free(maester->routes);
     }
@@ -204,7 +274,28 @@ void free_maester(Maester* maester) {
         free(maester->stock);
     }
 
+    if (maester->outbound_queue.buffer != NULL) {
+        free(maester->outbound_queue.buffer);
+    }
+
+    pthread_mutex_destroy(&maester->routes_lock);
+    pthread_mutex_destroy(&maester->alliances_lock);
+    pthread_mutex_destroy(&maester->envoys_lock);
+    pthread_mutex_destroy(&maester->connections_lock);
+    pthread_mutex_destroy(&maester->outbound_queue.lock);
+    pthread_cond_destroy(&maester->outbound_queue.cond);
+
     free(maester);
+}
+
+static void maester_reset_active_mission(Maester* maester) {
+    if (maester == NULL) {
+        return;
+    }
+    maester->active_mission.in_use = 0;
+    maester->active_mission.type = FRAME_TYPE_PLEDGE;
+    maester->active_mission.target_realm[0] = '\0';
+    maester->active_mission.deadline = 0;
 }
 
 // ============= COMMAND HANDLERS PHASE 1 =============
@@ -216,7 +307,7 @@ void cmd_list_realms(Maester* maester) {
     int printed = 0;
     for (int i = 0; i < maester->num_routes; i++) {
         // Skip DEFAULT - it's not a realm, it's the default route
-        if (my_strcasecmp(maester->routes[i].realm, "DEFAULT") == 0) {
+        if (my_strcasecmp(maester->routes[i].realm, ROUTE_DEFAULT) == 0) {
             continue;
         }
 
@@ -377,10 +468,170 @@ static void process_command(Maester* maester, char* input) {
     // EXIT
     if (token_count == 1 && my_strcasecmp(tokens[0], "EXIT") == 0) {
         g_should_exit = 1;
+        maester->shutting_down = 1;
         return;
     }
 
     write_str(STDOUT_FILENO, "Unknown command\n");
+}
+
+static int set_socket_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int maester_setup_listener(Maester* maester) {
+    if (maester == NULL) {
+        return -1;
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        write_str(STDERR_FILENO, "Error: Unable to create listening socket.\n");
+        return -1;
+    }
+
+    int enable = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) < 0) {
+        write_str(STDERR_FILENO, "Warning: setsockopt(SO_REUSEADDR) failed.\n");
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons((uint16_t)maester->port);
+
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        write_str(STDERR_FILENO, "Error: bind() failed. Is the port already in use?\n");
+        close(fd);
+        return -1;
+    }
+
+    if (set_socket_nonblocking(fd) < 0) {
+        write_str(STDERR_FILENO, "Error: failed to set listener socket non-blocking.\n");
+        close(fd);
+        return -1;
+    }
+
+    int backlog = maester->num_envoys + 4;
+    if (backlog < 4) backlog = 4;
+    if (listen(fd, backlog) < 0) {
+        write_str(STDERR_FILENO, "Error: listen() failed on listener socket.\n");
+        close(fd);
+        return -1;
+    }
+
+    maester->listen_fd = fd;
+
+    char port_buffer[16];
+    int_to_str(maester->port, port_buffer);
+    write_str(STDOUT_FILENO, "Listening for ravens on port ");
+    write_str(STDOUT_FILENO, port_buffer);
+    write_str(STDOUT_FILENO, " (INADDR_ANY).\n");
+    return 0;
+}
+
+static void maester_accept_placeholder(Maester* maester) {
+    if (maester == NULL || maester->listen_fd < 0) {
+        return;
+    }
+
+    while (1) {
+        struct sockaddr_in addr;
+        socklen_t addrlen = sizeof(addr);
+        int client_fd = accept(maester->listen_fd, (struct sockaddr*)&addr, &addrlen);
+        if (client_fd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+            write_str(STDERR_FILENO, "Warning: accept() failed on listener socket.\n");
+            break;
+        }
+
+        write_str(STDOUT_FILENO, "\nIncoming connection received (Phase 2 networking placeholder).\n");
+        close(client_fd);
+    }
+}
+
+static void maester_event_loop(Maester* maester) {
+    if (maester == NULL) return;
+
+    struct pollfd pollfds[2];
+    int need_prompt = 1;
+    char input[256];
+
+    pollfds[0].fd = STDIN_FILENO;
+    pollfds[0].events = POLLIN;
+    pollfds[0].revents = 0;
+
+    while (!g_should_exit && !maester->shutting_down) {
+        if (need_prompt) {
+            write_str(STDOUT_FILENO, "$ ");
+            need_prompt = 0;
+        }
+
+        int nfds = 1;
+        if (maester->listen_fd >= 0) {
+            pollfds[1].fd = maester->listen_fd;
+            pollfds[1].events = POLLIN;
+            pollfds[1].revents = 0;
+            nfds = 2;
+        }
+
+        int poll_result = poll(pollfds, nfds, 500);
+        if (poll_result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            write_str(STDERR_FILENO, "Poll failed. Leaving event loop.\n");
+            break;
+        }
+        if (poll_result == 0) {
+            continue;
+        }
+
+        if (pollfds[0].revents & (POLLIN | POLLPRI)) {
+            int bytes_read = read(STDIN_FILENO, input, sizeof(input) - 1);
+            if (bytes_read <= 0) {
+                if (bytes_read == 0) {
+                    write_str(STDOUT_FILENO, "\nStandard input closed. Exiting...\n");
+                } else if (errno != EINTR) {
+                    write_str(STDERR_FILENO, "Error reading from stdin. Exiting...\n");
+                }
+                g_should_exit = 1;
+            } else {
+                input[bytes_read] = '\0';
+                for (int i = 0; i < bytes_read; i++) {
+                    if (input[i] == '\n' || input[i] == '\r') {
+                        input[i] = '\0';
+                        break;
+                    }
+                }
+                if (my_strlen(input) > 0) {
+                    process_command(maester, input);
+                }
+            }
+            need_prompt = 1;
+        } else if (pollfds[0].revents & (POLLHUP | POLLERR)) {
+            g_should_exit = 1;
+        }
+
+        if (nfds == 2 && (pollfds[1].revents & POLLIN)) {
+            maester_accept_placeholder(maester);
+            need_prompt = 1;
+        } else if (nfds == 2 && (pollfds[1].revents & (POLLHUP | POLLERR))) {
+            write_str(STDERR_FILENO, "Listener socket reported an error.\n");
+        }
+    }
+
+    maester->shutting_down = 1;
 }
 
 int maester_run(const char* config_file, const char* stock_file) {
@@ -396,27 +647,12 @@ int maester_run(const char* config_file, const char* stock_file) {
     write_str(STDOUT_FILENO, maester->realm_name);
     write_str(STDOUT_FILENO, " initialized. The board is set.\n\n");
 
-    char input[256];
-
-    while (!g_should_exit) {
-        write_str(STDOUT_FILENO, "$ ");
-
-        int bytes_read = read(STDIN_FILENO, input, sizeof(input) - 1);
-        if (bytes_read < 0) {
-            if (errno == EINTR) {
-                if (g_should_exit) break;
-                continue;
-            }
-            break; // other read error
-        }
-        if (bytes_read == 0 || g_should_exit) break;
-
-        input[bytes_read] = '\0';
-        for (int i = 0; i < bytes_read; i++) {
-            if (input[i] == '\n' || input[i] == '\r') { input[i] = '\0'; break; }
-        }
-        if (my_strlen(input) > 0) process_command(maester, input);
+    if (maester_setup_listener(maester) < 0) {
+        free_maester(maester);
+        die("Unable to initialize networking listener.\n");
     }
+
+    maester_event_loop(maester);
 
     write_str(STDOUT_FILENO, "\nCleaning up resources...\n");
     free_maester(maester);
