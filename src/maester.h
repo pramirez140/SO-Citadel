@@ -118,6 +118,8 @@ typedef struct {
     int       in_use;
     FrameType type;
     char      target_realm[REALM_NAME_MAX];
+    char      description[64];
+    time_t    started_at;
     time_t    deadline;
 } MissionState;
 

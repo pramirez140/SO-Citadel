@@ -33,6 +33,12 @@ static void   maester_compact_connections(Maester* maester);
 static void   maester_close_all_connections(Maester* maester);
 static void   maester_handle_connection_event(Maester* maester, ConnectionEntry* entry, short revents);
 static void   maester_receive_placeholder(Maester* maester, ConnectionEntry* entry);
+static int    maester_mission_is_active(const Maester* maester);
+static void   maester_mission_reset(Maester* maester);
+static void   maester_mission_print_busy(const Maester* maester, const char* new_action);
+static int    maester_mission_begin(Maester* maester, FrameType type, const char* target, const char* description, int timeout_seconds);
+static void   maester_mission_finish(Maester* maester, const char* log_message);
+static void   maester_mission_check_timeouts(Maester* maester);
 
 Maester* create_maester(const char* realm_name, const char* folder_path, const char* ip, int port) {
     Maester* maester = (Maester*)malloc(sizeof(Maester));
@@ -316,7 +322,118 @@ static void maester_reset_active_mission(Maester* maester) {
     maester->active_mission.in_use = 0;
     maester->active_mission.type = FRAME_TYPE_PLEDGE;
     maester->active_mission.target_realm[0] = '\0';
+    maester->active_mission.description[0] = '\0';
+    maester->active_mission.started_at = 0;
     maester->active_mission.deadline = 0;
+}
+
+static int maester_mission_is_active(const Maester* maester) {
+    return (maester != NULL && maester->active_mission.in_use);
+}
+
+static void maester_mission_reset(Maester* maester) {
+    maester_reset_active_mission(maester);
+}
+
+static void maester_mission_print_busy(const Maester* maester, const char* new_action) {
+    if (maester == NULL || !maester_mission_is_active(maester)) return;
+    write_str(STDOUT_FILENO, "Cannot start ");
+    if (new_action != NULL) {
+        write_str(STDOUT_FILENO, new_action);
+    } else {
+        write_str(STDOUT_FILENO, "a new mission");
+    }
+    write_str(STDOUT_FILENO, ". Mission in progress: ");
+    if (maester->active_mission.description[0] != '\0') {
+        write_str(STDOUT_FILENO, maester->active_mission.description);
+    } else {
+        write_str(STDOUT_FILENO, frame_type_to_string(maester->active_mission.type));
+    }
+    if (maester->active_mission.target_realm[0] != '\0') {
+        write_str(STDOUT_FILENO, " (target: ");
+        write_str(STDOUT_FILENO, maester->active_mission.target_realm);
+        write_str(STDOUT_FILENO, ")");
+    }
+    write_str(STDOUT_FILENO, ".\n");
+}
+
+static int maester_mission_begin(Maester* maester, FrameType type, const char* target, const char* description, int timeout_seconds) {
+    if (maester == NULL) return 0;
+    if (maester_mission_is_active(maester)) {
+        maester_mission_print_busy(maester, description);
+        return 0;
+    }
+
+    maester->active_mission.in_use = 1;
+    maester->active_mission.type = type;
+    maester->active_mission.started_at = time(NULL);
+    if (target != NULL) {
+        my_strcpy(maester->active_mission.target_realm, target);
+    } else {
+        maester->active_mission.target_realm[0] = '\0';
+    }
+    if (description != NULL) {
+        my_strcpy(maester->active_mission.description, description);
+    } else {
+        maester->active_mission.description[0] = '\0';
+    }
+    if (timeout_seconds > 0) {
+        maester->active_mission.deadline = maester->active_mission.started_at + timeout_seconds;
+    } else {
+        maester->active_mission.deadline = 0;
+    }
+
+    if (description != NULL) {
+        write_str(STDOUT_FILENO, "Mission started: ");
+        write_str(STDOUT_FILENO, description);
+    } else {
+        write_str(STDOUT_FILENO, "Mission started.");
+    }
+    if (maester->active_mission.target_realm[0] != '\0') {
+        write_str(STDOUT_FILENO, " Target: ");
+        write_str(STDOUT_FILENO, maester->active_mission.target_realm);
+    }
+    if (timeout_seconds > 0) {
+        write_str(STDOUT_FILENO, " (timeout ");
+        char buf[16];
+        int_to_str(timeout_seconds, buf);
+        write_str(STDOUT_FILENO, buf);
+        write_str(STDOUT_FILENO, "s)");
+    }
+    write_str(STDOUT_FILENO, ".\n");
+    return 1;
+}
+
+static void maester_mission_finish(Maester* maester, const char* log_message) {
+    if (!maester_mission_is_active(maester)) {
+        return;
+    }
+    if (log_message != NULL) {
+        write_str(STDOUT_FILENO, log_message);
+        write_str(STDOUT_FILENO, "\n");
+    }
+    maester_mission_reset(maester);
+}
+
+static void maester_mission_check_timeouts(Maester* maester) {
+    if (!maester_mission_is_active(maester)) return;
+    if (maester->active_mission.deadline == 0) return;
+    time_t now = time(NULL);
+    if (now >= maester->active_mission.deadline) {
+        write_str(STDOUT_FILENO, "Mission timed out: ");
+        if (maester->active_mission.description[0] != '\0') {
+            write_str(STDOUT_FILENO, maester->active_mission.description);
+        } else {
+            write_str(STDOUT_FILENO, frame_type_to_string(maester->active_mission.type));
+        }
+        if (maester->active_mission.target_realm[0] != '\0') {
+            write_str(STDOUT_FILENO, " (target: ");
+            write_str(STDOUT_FILENO, maester->active_mission.target_realm);
+            write_str(STDOUT_FILENO, ")");
+        }
+        write_str(STDOUT_FILENO, ".\n");
+        maester_mission_reset(maester);
+    }
 }
 
 // ============= COMMAND HANDLERS PHASE 1 =============
@@ -355,6 +472,11 @@ void cmd_list_products(Maester* maester, const char* realm) {
         return;
     }
 
+    if (maester_mission_is_active(maester)) {
+        maester_mission_print_busy(maester, "a product list request");
+        return;
+    }
+
     write_str(STDOUT_FILENO, "ERROR: You must have an alliance with ");
     write_str(STDOUT_FILENO, realm);
     write_str(STDOUT_FILENO, " to trade.\n");
@@ -364,6 +486,11 @@ void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {
     if (maester == NULL || realm == NULL) return;
 
     (void)sigil;
+
+    if (maester_mission_is_active(maester)) {
+        maester_mission_print_busy(maester, "a pledge mission");
+        return;
+    }
 
     int used_default = 0;
     Route* route = maester_resolve_route(maester, realm, &used_default);
@@ -378,6 +505,14 @@ void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {
 
     if (maester_get_or_open_connection(maester, route->realm, route->ip, route->port) == NULL) {
         write_str(STDOUT_FILENO, "Failed to prepare connection for pledge.\n");
+        return;
+    }
+
+    char mission_desc[64];
+    mission_desc[0] = '\0';
+    str_append(mission_desc, "Pledge to ");
+    str_append(mission_desc, realm);
+    if (!maester_mission_begin(maester, FRAME_TYPE_PLEDGE, realm, mission_desc, 120)) {
         return;
     }
 
@@ -396,7 +531,35 @@ void cmd_pledge_respond(Maester* maester, const char* realm, const char* respons
 void cmd_pledge_status(Maester* maester) {
     if (maester == NULL) return;
 
-    write_str(STDOUT_FILENO, "Command OK\n");
+    maester_mission_check_timeouts(maester);
+    if (!maester_mission_is_active(maester)) {
+        write_str(STDOUT_FILENO, "No active missions.\n");
+        return;
+    }
+
+    write_str(STDOUT_FILENO, "Mission in progress: ");
+    if (maester->active_mission.description[0] != '\0') {
+        write_str(STDOUT_FILENO, maester->active_mission.description);
+    } else {
+        write_str(STDOUT_FILENO, frame_type_to_string(maester->active_mission.type));
+    }
+    if (maester->active_mission.target_realm[0] != '\0') {
+        write_str(STDOUT_FILENO, " (target: ");
+        write_str(STDOUT_FILENO, maester->active_mission.target_realm);
+        write_str(STDOUT_FILENO, ")");
+    }
+    write_str(STDOUT_FILENO, ".\n");
+
+    if (maester->active_mission.deadline > 0) {
+        time_t now = time(NULL);
+        long remaining = (long)(maester->active_mission.deadline - now);
+        if (remaining < 0) remaining = 0;
+        write_str(STDOUT_FILENO, "Time remaining: ");
+        char buf[16];
+        int_to_str((int)remaining, buf);
+        write_str(STDOUT_FILENO, buf);
+        write_str(STDOUT_FILENO, " seconds.\n");
+    }
 }
 
 void cmd_envoy_status(Maester* maester) {
@@ -937,6 +1100,7 @@ static int parse_command(char* input, char* tokens[], int max_tokens) {
 
 // ========== Dispatch one command ==========
 static void process_command(Maester* maester, char* input) {
+    maester_mission_check_timeouts(maester);
     char* tokens[10];
     int token_count = parse_command(input, tokens, 10);
     if (token_count == 0) return;
@@ -985,8 +1149,21 @@ static void process_command(Maester* maester, char* input) {
             return;
         }
         if (my_strcasecmp(tokens[1], "TRADE") == 0) {
-            if (token_count >= 3) { cmd_start_trade(maester, tokens[2]); }
-            else {
+            if (token_count >= 3) {
+                if (maester_mission_is_active(maester)) {
+                    maester_mission_print_busy(maester, "a trade mission");
+                    return;
+                }
+                char desc[64];
+                desc[0] = '\0';
+                str_append(desc, "Trade with ");
+                str_append(desc, tokens[2]);
+                if (!maester_mission_begin(maester, FRAME_TYPE_ORDER_HEADER, tokens[2], desc, 0)) {
+                    return;
+                }
+                cmd_start_trade(maester, tokens[2]);
+                maester_mission_finish(maester, "Trade mission finished.");
+            } else {
                 write_str(STDOUT_FILENO, "Did you mean to start a trade? Please review syntax.\n");
                 write_str(STDOUT_FILENO, "Usage: START TRADE <REALM>\n");
             }
@@ -1108,6 +1285,7 @@ static void maester_event_loop(Maester* maester) {
     char input[256];
 
     while (!g_should_exit && !maester->shutting_down) {
+        maester_mission_check_timeouts(maester);
         maester_compact_connections(maester);
 
         if (need_prompt) {
