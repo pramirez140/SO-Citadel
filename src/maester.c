@@ -16,6 +16,10 @@ static int  set_socket_nonblocking(int fd);
 static int  maester_setup_listener(Maester* maester);
 static void maester_accept_placeholder(Maester* maester);
 static void maester_event_loop(Maester* maester);
+static void frame_copy_field_padded(const char* src, uint8_t* dst, size_t field_len);
+static void frame_extract_field(const uint8_t* src, size_t field_len, char* dst, size_t dst_len);
+static void frame_buffer_consume(FrameBuffer* fb, size_t bytes);
+static void frame_store_field(char* dst, size_t dst_len, const char* src);
 
 Maester* create_maester(const char* realm_name, const char* folder_path, const char* ip, int port) {
     Maester* maester = (Maester*)malloc(sizeof(Maester));
@@ -367,6 +371,264 @@ void cmd_envoy_status(Maester* maester) {
     if (maester == NULL) return;
 
     write_str(STDOUT_FILENO, "Command OK\n");
+}
+
+// ========== Frame utilities (Phase 2) ==========
+
+static void frame_copy_field_padded(const char* src, uint8_t* dst, size_t field_len) {
+    if (dst == NULL || field_len == 0) {
+        return;
+    }
+    memset(dst, 0, field_len);
+    if (src == NULL) {
+        return;
+    }
+    size_t copy_len = my_strlen(src);
+    if (copy_len > field_len) {
+        copy_len = field_len;
+    }
+    memcpy(dst, src, copy_len);
+}
+
+static void frame_extract_field(const uint8_t* src, size_t field_len, char* dst, size_t dst_len) {
+    if (dst == NULL || dst_len == 0) return;
+    size_t copy_len = (field_len < dst_len - 1) ? field_len : dst_len - 1;
+    if (src != NULL && copy_len > 0) {
+        memcpy(dst, src, copy_len);
+    }
+    dst[copy_len] = '\0';
+    // Trim trailing nulls/spaces
+    for (ssize_t i = (ssize_t)copy_len - 1; i >= 0; --i) {
+        if (dst[i] == '\0') continue;
+        if (dst[i] == ' ' || dst[i] == '\0') {
+            dst[i] = '\0';
+        } else {
+            break;
+        }
+    }
+}
+
+static void frame_store_field(char* dst, size_t dst_len, const char* src) {
+    if (dst == NULL || dst_len == 0) return;
+    size_t copy_len = 0;
+    if (src != NULL) {
+        copy_len = my_strlen(src);
+        if (copy_len > dst_len - 1) {
+            copy_len = dst_len - 1;
+        }
+        memcpy(dst, src, copy_len);
+    }
+    dst[copy_len] = '\0';
+}
+
+uint16_t frame_compute_checksum_bytes(const uint8_t* buffer, size_t length) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i < length; i++) {
+        sum += buffer[i];
+    }
+    return (uint16_t)(sum % 65536);
+}
+
+void frame_init(CitadelFrame* frame, FrameType type, const char* origin, const char* destination) {
+    if (frame == NULL) {
+        return;
+    }
+    frame->type = type;
+    frame->data_length = 0;
+    frame->checksum = 0;
+    frame->data[0] = 0;
+    frame_store_field(frame->origin, sizeof(frame->origin), origin);
+    frame_store_field(frame->destination, sizeof(frame->destination), destination);
+}
+
+int frame_serialize(const CitadelFrame* frame, uint8_t* buffer, size_t buffer_len, size_t* out_len) {
+    if (frame == NULL || buffer == NULL) {
+        return -1;
+    }
+    if (frame->data_length > FRAME_MAX_DATA) {
+        return -1;
+    }
+    size_t required = FRAME_HEADER_LEN + frame->data_length + FRAME_CHECKSUM_LEN;
+    if (buffer_len < required) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    buffer[offset++] = (uint8_t)frame->type;
+
+    frame_copy_field_padded(frame->origin, buffer + offset, FRAME_ORIGIN_LEN);
+    offset += FRAME_ORIGIN_LEN;
+    frame_copy_field_padded(frame->destination, buffer + offset, FRAME_DEST_LEN);
+    offset += FRAME_DEST_LEN;
+
+    buffer[offset++] = (uint8_t)((frame->data_length >> 8) & 0xFF);
+    buffer[offset++] = (uint8_t)(frame->data_length & 0xFF);
+
+    if (frame->data_length > 0) {
+        memcpy(buffer + offset, frame->data, frame->data_length);
+        offset += frame->data_length;
+    }
+
+    uint16_t checksum = frame_compute_checksum_bytes(buffer, offset);
+    buffer[offset++] = (uint8_t)((checksum >> 8) & 0xFF);
+    buffer[offset++] = (uint8_t)(checksum & 0xFF);
+
+    if (out_len != NULL) {
+        *out_len = offset;
+    }
+    return 0;
+}
+
+FrameParseResult frame_deserialize(const uint8_t* buffer, size_t length, CitadelFrame* frame, size_t* consumed_bytes) {
+    if (consumed_bytes != NULL) {
+        *consumed_bytes = 0;
+    }
+    if (buffer == NULL || frame == NULL) {
+        return FRAME_PARSE_INVALID;
+    }
+
+    if (length < FRAME_HEADER_LEN + FRAME_CHECKSUM_LEN) {
+        return FRAME_PARSE_NEED_MORE;
+    }
+
+    size_t offset = 0;
+    frame->type = (FrameType)buffer[offset++];
+
+    frame_extract_field(buffer + offset, FRAME_ORIGIN_LEN, frame->origin, sizeof(frame->origin));
+    offset += FRAME_ORIGIN_LEN;
+    frame_extract_field(buffer + offset, FRAME_DEST_LEN, frame->destination, sizeof(frame->destination));
+    offset += FRAME_DEST_LEN;
+
+    uint16_t data_len = (uint16_t)((buffer[offset] << 8) | buffer[offset + 1]);
+    offset += 2;
+
+    if (data_len > FRAME_MAX_DATA) {
+        return FRAME_PARSE_INVALID;
+    }
+
+    size_t total_needed = FRAME_HEADER_LEN + data_len + FRAME_CHECKSUM_LEN;
+    if (length < total_needed) {
+        return FRAME_PARSE_NEED_MORE;
+    }
+
+    frame->data_length = data_len;
+    if (data_len > 0) {
+        memcpy(frame->data, buffer + offset, data_len);
+    }
+    offset += data_len;
+
+    frame->checksum = (uint16_t)((buffer[offset] << 8) | buffer[offset + 1]);
+    offset += 2;
+
+    uint16_t computed = frame_compute_checksum_bytes(buffer, total_needed - FRAME_CHECKSUM_LEN);
+    if (frame->checksum != computed) {
+        if (consumed_bytes != NULL) {
+            *consumed_bytes = total_needed;
+        }
+        return FRAME_PARSE_BAD_CHECKSUM;
+    }
+
+    if (consumed_bytes != NULL) {
+        *consumed_bytes = total_needed;
+    }
+    return FRAME_PARSE_OK;
+}
+
+const char* frame_type_to_string(FrameType type) {
+    switch (type) {
+        case FRAME_TYPE_PLEDGE: return "PLEDGE";
+        case FRAME_TYPE_PLEDGE_RESPONSE: return "PLEDGE_RESP";
+        case FRAME_TYPE_LIST_REQUEST: return "LIST_REQ";
+        case FRAME_TYPE_LIST_RESPONSE: return "LIST_RESP";
+        case FRAME_TYPE_ORDER_HEADER: return "ORDER_HDR";
+        case FRAME_TYPE_ORDER_DATA: return "ORDER_DATA";
+        case FRAME_TYPE_ORDER_RESPONSE: return "ORDER_RESP";
+        case FRAME_TYPE_DISCONNECT: return "DISCONNECT";
+        case FRAME_TYPE_ERROR_UNKNOWN: return "ERR_UNKNOWN";
+        case FRAME_TYPE_ERROR_UNAUTHORIZED: return "ERR_AUTH";
+        case FRAME_TYPE_ACK_FILE: return "ACK_FILE";
+        case FRAME_TYPE_ACK_MD5: return "ACK_MD5";
+        case FRAME_TYPE_NACK: return "NACK";
+        default: return "UNKNOWN";
+    }
+}
+
+void frame_log_summary(const char* prefix, const CitadelFrame* frame) {
+    if (frame == NULL) return;
+    if (prefix != NULL) {
+        write_str(STDOUT_FILENO, prefix);
+        write_str(STDOUT_FILENO, ": ");
+    }
+    write_str(STDOUT_FILENO, frame_type_to_string(frame->type));
+    write_str(STDOUT_FILENO, " | origin=");
+    write_str(STDOUT_FILENO, frame->origin);
+    write_str(STDOUT_FILENO, " dest=");
+    write_str(STDOUT_FILENO, frame->destination);
+    write_str(STDOUT_FILENO, " len=");
+    char len_buf[16];
+    int_to_str(frame->data_length, len_buf);
+    write_str(STDOUT_FILENO, len_buf);
+    write_str(STDOUT_FILENO, "\n");
+}
+
+void frame_buffer_init(FrameBuffer* fb) {
+    if (fb == NULL) return;
+    fb->length = 0;
+}
+
+void frame_buffer_reset(FrameBuffer* fb) {
+    if (fb == NULL) return;
+    fb->length = 0;
+}
+
+static void frame_buffer_consume(FrameBuffer* fb, size_t bytes) {
+    if (fb == NULL || bytes == 0 || fb->length == 0) return;
+    if (bytes >= fb->length) {
+        fb->length = 0;
+        return;
+    }
+    memmove(fb->data, fb->data + bytes, fb->length - bytes);
+    fb->length -= bytes;
+}
+
+int frame_buffer_append(FrameBuffer* fb, const uint8_t* data, size_t length) {
+    if (fb == NULL || data == NULL) return -1;
+    if (length == 0) return 0;
+    if (fb->length + length > FRAME_BUFFER_CAPACITY) {
+        return -1;
+    }
+    memcpy(fb->data + fb->length, data, length);
+    fb->length += length;
+    return 0;
+}
+
+FrameParseResult frame_buffer_extract(FrameBuffer* fb, CitadelFrame* frame, size_t* consumed_bytes) {
+    if (fb == NULL || frame == NULL) {
+        return FRAME_PARSE_INVALID;
+    }
+    if (fb->length == 0) {
+        if (consumed_bytes) {
+            *consumed_bytes = 0;
+        }
+        return FRAME_PARSE_NEED_MORE;
+    }
+
+    size_t consumed = 0;
+    FrameParseResult result = frame_deserialize(fb->data, fb->length, frame, &consumed);
+    if (result == FRAME_PARSE_OK) {
+        frame_buffer_consume(fb, consumed);
+        if (consumed_bytes) {
+            *consumed_bytes = consumed;
+        }
+        return FRAME_PARSE_OK;
+    }
+    if (result == FRAME_PARSE_BAD_CHECKSUM || result == FRAME_PARSE_INVALID) {
+        frame_buffer_reset(fb);
+    }
+    if (consumed_bytes) {
+        *consumed_bytes = consumed;
+    }
+    return result;
 }
 
 

@@ -15,10 +15,18 @@
 #include "stock.h"
 #include "helper.h"
 
-#define REALM_NAME_MAX   64
-#define IP_ADDR_MAX      46
-#define PATH_MAX_LEN     256
-#define ROUTE_DEFAULT    "DEFAULT"
+#define REALM_NAME_MAX        64
+#define IP_ADDR_MAX           46
+#define PATH_MAX_LEN          256
+#define ROUTE_DEFAULT         "DEFAULT"
+
+#define FRAME_ORIGIN_LEN      20
+#define FRAME_DEST_LEN        20
+#define FRAME_MAX_DATA        320
+#define FRAME_HEADER_LEN      (1 + FRAME_ORIGIN_LEN + FRAME_DEST_LEN + 2)
+#define FRAME_CHECKSUM_LEN    2
+#define FRAME_MAX_SIZE        (FRAME_HEADER_LEN + FRAME_MAX_DATA + FRAME_CHECKSUM_LEN)
+#define FRAME_BUFFER_CAPACITY (FRAME_MAX_SIZE * 4)
 
 typedef enum {
     ALLIANCE_UNKNOWN = 0,
@@ -66,11 +74,11 @@ typedef struct {
 
 typedef struct {
     FrameType  type;
-    char       origin[REALM_NAME_MAX];
-    char       destination[REALM_NAME_MAX];
-    uint32_t   data_length;
-    char      *data;
-    uint32_t   checksum;
+    char       origin[FRAME_ORIGIN_LEN + 1];
+    char       destination[FRAME_DEST_LEN + 1];
+    uint16_t   data_length;
+    uint8_t    data[FRAME_MAX_DATA];
+    uint16_t   checksum;
 } CitadelFrame;
 
 typedef struct {
@@ -106,12 +114,24 @@ typedef struct {
     pthread_cond_t  cond;
 } FrameQueue;
 
+typedef enum {
+    FRAME_PARSE_OK = 0,
+    FRAME_PARSE_NEED_MORE = 1,
+    FRAME_PARSE_INVALID = -1,
+    FRAME_PARSE_BAD_CHECKSUM = -2
+} FrameParseResult;
+
 typedef struct {
     int       in_use;
     FrameType type;
     char      target_realm[REALM_NAME_MAX];
     time_t    deadline;
 } MissionState;
+
+typedef struct {
+    uint8_t data[FRAME_BUFFER_CAPACITY];
+    size_t  length;
+} FrameBuffer;
 
 typedef struct Maester {
     char realm_name[REALM_NAME_MAX];
@@ -158,5 +178,18 @@ void cmd_pledge_status(Maester* maester);
 void cmd_envoy_status(Maester* maester);
 // Runs the Maester
 int maester_run(const char* config_file, const char* stock_file);
+
+// Frame helpers (Phase 2 networking)
+void             frame_init(CitadelFrame* frame, FrameType type, const char* origin, const char* destination);
+int              frame_serialize(const CitadelFrame* frame, uint8_t* buffer, size_t buffer_len, size_t* out_len);
+FrameParseResult frame_deserialize(const uint8_t* buffer, size_t length, CitadelFrame* frame, size_t* consumed_bytes);
+uint16_t         frame_compute_checksum_bytes(const uint8_t* buffer, size_t length);
+void             frame_log_summary(const char* prefix, const CitadelFrame* frame);
+const char*      frame_type_to_string(FrameType type);
+
+void frame_buffer_init(FrameBuffer* fb);
+void frame_buffer_reset(FrameBuffer* fb);
+int  frame_buffer_append(FrameBuffer* fb, const uint8_t* data, size_t length);
+FrameParseResult frame_buffer_extract(FrameBuffer* fb, CitadelFrame* frame, size_t* consumed_bytes);
 
 #endif
