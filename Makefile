@@ -6,6 +6,8 @@ TARGET  = maester
 
 SOURCES = $(SRCDIR)/main.c \
           $(SRCDIR)/maester.c \
+          $(SRCDIR)/network.c \
+          $(SRCDIR)/missions.c \
           $(SRCDIR)/stock.c \
           $(SRCDIR)/helper.c \
           $(SRCDIR)/trade.c

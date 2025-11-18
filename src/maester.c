@@ -1,9 +1,12 @@
 #include "maester.h"
 #include "trade.h"
+#include "network.h"
+#include "missions.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -11,34 +14,19 @@
 
 #define MAX_LINE_LENGTH 256
 
-static void maester_reset_active_mission(Maester* maester);
 static int  set_socket_nonblocking(int fd);
 static int  maester_setup_listener(Maester* maester);
 static void maester_accept_placeholder(Maester* maester);
 static void maester_event_loop(Maester* maester);
-static void frame_copy_field_padded(const char* src, uint8_t* dst, size_t field_len);
-static void frame_extract_field(const uint8_t* src, size_t field_len, char* dst, size_t dst_len);
-static void frame_buffer_consume(FrameBuffer* fb, size_t bytes);
-static void frame_store_field(char* dst, size_t dst_len, const char* src);
-static Route* maester_find_route(Maester* maester, const char* realm);
-static Route* maester_find_default_route(Maester* maester);
-static int    maester_route_is_known(const Route* route);
-static Route* maester_resolve_route(Maester* maester, const char* destination, int* used_default);
-static void   maester_log_route_resolution(const char* destination, const Route* route, int used_default);
-static ConnectionEntry* maester_find_connection(Maester* maester, const char* realm);
-static ConnectionEntry* maester_add_connection_entry(Maester* maester);
-static void   maester_close_connection_entry(ConnectionEntry* entry);
-static ConnectionEntry* maester_get_or_open_connection(Maester* maester, const char* realm, const char* ip, int port);
-static void   maester_compact_connections(Maester* maester);
-static void   maester_close_all_connections(Maester* maester);
+static int  build_origin_string(const Maester* maester, char* buffer, size_t len);
+static int  maester_join_path(const char* base, const char* relative, char* output, size_t output_len);
+static const char* maester_basename(const char* path);
+static int  maester_prepare_sigil_metadata(Maester* maester, const char* sigil, char* sigil_name,
+                                           size_t sigil_name_len, char* file_size_str,
+                                           size_t size_len, char md5_hex[33]);
 static void   maester_handle_connection_event(Maester* maester, ConnectionEntry* entry, short revents);
 static void   maester_receive_placeholder(Maester* maester, ConnectionEntry* entry);
-static int    maester_mission_is_active(const Maester* maester);
-static void   maester_mission_reset(Maester* maester);
-static void   maester_mission_print_busy(const Maester* maester, const char* new_action);
-static int    maester_mission_begin(Maester* maester, FrameType type, const char* target, const char* description, int timeout_seconds);
-static void   maester_mission_finish(Maester* maester, const char* log_message);
-static void   maester_mission_check_timeouts(Maester* maester);
+static void   maester_process_incoming_frame(Maester* maester, ConnectionEntry* entry, const CitadelFrame* frame);
 
 Maester* create_maester(const char* realm_name, const char* folder_path, const char* ip, int port) {
     Maester* maester = (Maester*)malloc(sizeof(Maester));
@@ -81,7 +69,7 @@ Maester* create_maester(const char* realm_name, const char* folder_path, const c
     pthread_mutex_init(&maester->connections_lock, NULL);
     pthread_mutex_init(&maester->outbound_queue.lock, NULL);
     pthread_cond_init(&maester->outbound_queue.cond, NULL);
-    maester_reset_active_mission(maester);
+    maester_mission_init(maester);
 
     return maester;
 }
@@ -315,125 +303,100 @@ void free_maester(Maester* maester) {
     free(maester);
 }
 
-static void maester_reset_active_mission(Maester* maester) {
-    if (maester == NULL) {
-        return;
+static int build_origin_string(const Maester* maester, char* buffer, size_t len) {
+    if (maester == NULL || buffer == NULL || len == 0) return -1;
+    int written = snprintf(buffer, len, "%s:%d", maester->ip, maester->port);
+    if (written < 0 || (size_t)written >= len || (size_t)written > FRAME_ORIGIN_LEN) {
+        return -1;
     }
-    maester->active_mission.in_use = 0;
-    maester->active_mission.type = FRAME_TYPE_PLEDGE;
-    maester->active_mission.target_realm[0] = '\0';
-    maester->active_mission.description[0] = '\0';
-    maester->active_mission.started_at = 0;
-    maester->active_mission.deadline = 0;
+    return 0;
 }
 
-static int maester_mission_is_active(const Maester* maester) {
-    return (maester != NULL && maester->active_mission.in_use);
-}
+static int maester_join_path(const char* base, const char* relative, char* output, size_t output_len) {
+    if (output == NULL || relative == NULL || output_len == 0) return -1;
 
-static void maester_mission_reset(Maester* maester) {
-    maester_reset_active_mission(maester);
-}
-
-static void maester_mission_print_busy(const Maester* maester, const char* new_action) {
-    if (maester == NULL || !maester_mission_is_active(maester)) return;
-    write_str(STDOUT_FILENO, "Cannot start ");
-    if (new_action != NULL) {
-        write_str(STDOUT_FILENO, new_action);
-    } else {
-        write_str(STDOUT_FILENO, "a new mission");
-    }
-    write_str(STDOUT_FILENO, ". Mission in progress: ");
-    if (maester->active_mission.description[0] != '\0') {
-        write_str(STDOUT_FILENO, maester->active_mission.description);
-    } else {
-        write_str(STDOUT_FILENO, frame_type_to_string(maester->active_mission.type));
-    }
-    if (maester->active_mission.target_realm[0] != '\0') {
-        write_str(STDOUT_FILENO, " (target: ");
-        write_str(STDOUT_FILENO, maester->active_mission.target_realm);
-        write_str(STDOUT_FILENO, ")");
-    }
-    write_str(STDOUT_FILENO, ".\n");
-}
-
-static int maester_mission_begin(Maester* maester, FrameType type, const char* target, const char* description, int timeout_seconds) {
-    if (maester == NULL) return 0;
-    if (maester_mission_is_active(maester)) {
-        maester_mission_print_busy(maester, description);
+    if (relative[0] == '/' || relative[0] == '\\') {
+        size_t rel_len = my_strlen(relative);
+        if (rel_len + 1 > output_len) return -1;
+        my_strcpy(output, relative);
         return 0;
     }
 
-    maester->active_mission.in_use = 1;
-    maester->active_mission.type = type;
-    maester->active_mission.started_at = time(NULL);
-    if (target != NULL) {
-        my_strcpy(maester->active_mission.target_realm, target);
-    } else {
-        maester->active_mission.target_realm[0] = '\0';
-    }
-    if (description != NULL) {
-        my_strcpy(maester->active_mission.description, description);
-    } else {
-        maester->active_mission.description[0] = '\0';
-    }
-    if (timeout_seconds > 0) {
-        maester->active_mission.deadline = maester->active_mission.started_at + timeout_seconds;
-    } else {
-        maester->active_mission.deadline = 0;
+    if (base == NULL || base[0] == '\0') {
+        size_t rel_len = my_strlen(relative);
+        if (rel_len + 1 > output_len) return -1;
+        my_strcpy(output, relative);
+        return 0;
     }
 
-    if (description != NULL) {
-        write_str(STDOUT_FILENO, "Mission started: ");
-        write_str(STDOUT_FILENO, description);
-    } else {
-        write_str(STDOUT_FILENO, "Mission started.");
+    output[0] = '\0';
+    if (safe_append(output, output_len, base) != 0) return -1;
+    size_t base_len = my_strlen(output);
+    if (base_len > 0 && output[base_len - 1] != '/') {
+        if (safe_append(output, output_len, "/") != 0) return -1;
     }
-    if (maester->active_mission.target_realm[0] != '\0') {
-        write_str(STDOUT_FILENO, " Target: ");
-        write_str(STDOUT_FILENO, maester->active_mission.target_realm);
-    }
-    if (timeout_seconds > 0) {
-        write_str(STDOUT_FILENO, " (timeout ");
-        char buf[16];
-        int_to_str(timeout_seconds, buf);
-        write_str(STDOUT_FILENO, buf);
-        write_str(STDOUT_FILENO, "s)");
-    }
-    write_str(STDOUT_FILENO, ".\n");
-    return 1;
+    if (safe_append(output, output_len, relative) != 0) return -1;
+    return 0;
 }
 
-static void maester_mission_finish(Maester* maester, const char* log_message) {
-    if (!maester_mission_is_active(maester)) {
-        return;
+static const char* maester_basename(const char* path) {
+    if (path == NULL) return "";
+    const char* base = path;
+    for (const char* p = path; *p != '\0'; ++p) {
+        if (*p == '/' || *p == '\\') {
+            base = p + 1;
+        }
     }
-    if (log_message != NULL) {
-        write_str(STDOUT_FILENO, log_message);
+    return base;
+}
+
+static int maester_prepare_sigil_metadata(Maester* maester, const char* sigil, char* sigil_name,
+                                          size_t sigil_name_len, char* file_size_str,
+                                          size_t size_len, char md5_hex[33]) {
+    if (maester == NULL || sigil == NULL || sigil_name == NULL || file_size_str == NULL || md5_hex == NULL) {
+        return -1;
+    }
+
+    char full_path[PATH_MAX_LEN * 2];
+    if (maester_join_path(maester->folder_path, sigil, full_path, sizeof(full_path)) != 0) {
+        write_str(STDOUT_FILENO, "Error: Sigil path too long.\n");
+        return -1;
+    }
+
+    struct stat st;
+    if (stat(full_path, &st) < 0 || !S_ISREG(st.st_mode)) {
+        write_str(STDOUT_FILENO, "Error: Sigil file not found: ");
+        write_str(STDOUT_FILENO, full_path);
         write_str(STDOUT_FILENO, "\n");
+        return -1;
     }
-    maester_mission_reset(maester);
-}
 
-static void maester_mission_check_timeouts(Maester* maester) {
-    if (!maester_mission_is_active(maester)) return;
-    if (maester->active_mission.deadline == 0) return;
-    time_t now = time(NULL);
-    if (now >= maester->active_mission.deadline) {
-        write_str(STDOUT_FILENO, "Mission timed out: ");
-        if (maester->active_mission.description[0] != '\0') {
-            write_str(STDOUT_FILENO, maester->active_mission.description);
-        } else {
-            write_str(STDOUT_FILENO, frame_type_to_string(maester->active_mission.type));
-        }
-        if (maester->active_mission.target_realm[0] != '\0') {
-            write_str(STDOUT_FILENO, " (target: ");
-            write_str(STDOUT_FILENO, maester->active_mission.target_realm);
-            write_str(STDOUT_FILENO, ")");
-        }
-        write_str(STDOUT_FILENO, ".\n");
-        maester_mission_reset(maester);
+    uint8_t digest[16];
+    if (md5_compute_file(full_path, digest) != 0) {
+        write_str(STDOUT_FILENO, "Error: Could not compute MD5 of sigil file.\n");
+        return -1;
     }
+
+    md5_digest_to_hex(digest, md5_hex);
+
+    const char* base_name = maester_basename(sigil);
+    size_t base_len = my_strlen(base_name);
+    if (base_len + 1 > sigil_name_len) {
+        write_str(STDOUT_FILENO, "Error: Sigil file name too long.\n");
+        return -1;
+    }
+    my_strcpy(sigil_name, base_name);
+
+    char size_buffer[32];
+    ulong_to_str((unsigned long long)st.st_size, size_buffer);
+    size_t size_buffer_len = my_strlen(size_buffer);
+    if (size_buffer_len + 1 > size_len) {
+        write_str(STDOUT_FILENO, "Error: Could not convert file size.\n");
+        return -1;
+    }
+    my_strcpy(file_size_str, size_buffer);
+
+    return 0;
 }
 
 // ============= COMMAND HANDLERS PHASE 1 =============
@@ -485,12 +448,34 @@ void cmd_list_products(Maester* maester, const char* realm) {
 void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {
     if (maester == NULL || realm == NULL) return;
 
-    (void)sigil;
-
     if (maester_mission_is_active(maester)) {
         maester_mission_print_busy(maester, "a pledge mission");
         return;
     }
+
+    char sigil_name[PATH_MAX_LEN];
+    char file_size_str[32];
+    char md5_hex[33];
+    if (maester_prepare_sigil_metadata(maester, sigil, sigil_name, sizeof(sigil_name),
+                                       file_size_str, sizeof(file_size_str), md5_hex) != 0) {
+        return;
+    }
+
+    char origin[FRAME_ORIGIN_LEN + 1];
+    if (build_origin_string(maester, origin, sizeof(origin)) != 0) {
+        write_str(STDOUT_FILENO, "Error: Origin endpoint too long.\n");
+        return;
+    }
+
+    CitadelFrame frame;
+    frame_init(&frame, FRAME_TYPE_PLEDGE, origin, realm);
+    int payload_len = snprintf((char*)frame.data, FRAME_MAX_DATA, "%s&%s&%s&%s",
+                               maester->realm_name, sigil_name, file_size_str, md5_hex);
+    if (payload_len < 0 || payload_len >= FRAME_MAX_DATA) {
+        write_str(STDOUT_FILENO, "Error: Pledge data too large.\n");
+        return;
+    }
+    frame.data_length = (uint16_t)payload_len;
 
     int used_default = 0;
     Route* route = maester_resolve_route(maester, realm, &used_default);
@@ -503,15 +488,22 @@ void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {
 
     maester_log_route_resolution(realm, route, used_default);
 
-    if (maester_get_or_open_connection(maester, route->realm, route->ip, route->port) == NULL) {
+    ConnectionEntry* connection = maester_get_or_open_connection(maester, route->realm, route->ip, route->port);
+    if (connection == NULL) {
         write_str(STDOUT_FILENO, "Failed to prepare connection for pledge.\n");
+        return;
+    }
+
+    if (maester_send_frame(connection, &frame) != 0) {
+        write_str(STDOUT_FILENO, "Error: Failed to send pledge frame.\n");
+        maester_close_connection_entry(connection);
         return;
     }
 
     char mission_desc[64];
     mission_desc[0] = '\0';
-    str_append(mission_desc, "Pledge to ");
-    str_append(mission_desc, realm);
+    safe_append(mission_desc, sizeof(mission_desc), "Pledge to ");
+    safe_append(mission_desc, sizeof(mission_desc), realm);
     if (!maester_mission_begin(maester, FRAME_TYPE_PLEDGE, realm, mission_desc, 120)) {
         return;
     }
@@ -568,467 +560,7 @@ void cmd_envoy_status(Maester* maester) {
     write_str(STDOUT_FILENO, "Command OK\n");
 }
 
-// ========== Frame utilities (Phase 2) ==========
-
-static void frame_copy_field_padded(const char* src, uint8_t* dst, size_t field_len) {
-    if (dst == NULL || field_len == 0) {
-        return;
-    }
-    memset(dst, 0, field_len);
-    if (src == NULL) {
-        return;
-    }
-    size_t copy_len = my_strlen(src);
-    if (copy_len > field_len) {
-        copy_len = field_len;
-    }
-    memcpy(dst, src, copy_len);
-}
-
-static void frame_extract_field(const uint8_t* src, size_t field_len, char* dst, size_t dst_len) {
-    if (dst == NULL || dst_len == 0) return;
-    size_t copy_len = (field_len < dst_len - 1) ? field_len : dst_len - 1;
-    if (src != NULL && copy_len > 0) {
-        memcpy(dst, src, copy_len);
-    }
-    dst[copy_len] = '\0';
-    // Trim trailing nulls/spaces
-    for (ssize_t i = (ssize_t)copy_len - 1; i >= 0; --i) {
-        if (dst[i] == '\0') continue;
-        if (dst[i] == ' ' || dst[i] == '\0') {
-            dst[i] = '\0';
-        } else {
-            break;
-        }
-    }
-}
-
-static void frame_store_field(char* dst, size_t dst_len, const char* src) {
-    if (dst == NULL || dst_len == 0) return;
-    size_t copy_len = 0;
-    if (src != NULL) {
-        copy_len = my_strlen(src);
-        if (copy_len > dst_len - 1) {
-            copy_len = dst_len - 1;
-        }
-        memcpy(dst, src, copy_len);
-    }
-    dst[copy_len] = '\0';
-}
-
-uint16_t frame_compute_checksum_bytes(const uint8_t* buffer, size_t length) {
-    uint32_t sum = 0;
-    for (size_t i = 0; i < length; i++) {
-        sum += buffer[i];
-    }
-    return (uint16_t)(sum % 65536);
-}
-
-void frame_init(CitadelFrame* frame, FrameType type, const char* origin, const char* destination) {
-    if (frame == NULL) {
-        return;
-    }
-    frame->type = type;
-    frame->data_length = 0;
-    frame->checksum = 0;
-    frame->data[0] = 0;
-    frame_store_field(frame->origin, sizeof(frame->origin), origin);
-    frame_store_field(frame->destination, sizeof(frame->destination), destination);
-}
-
-int frame_serialize(const CitadelFrame* frame, uint8_t* buffer, size_t buffer_len, size_t* out_len) {
-    if (frame == NULL || buffer == NULL) {
-        return -1;
-    }
-    if (frame->data_length > FRAME_MAX_DATA) {
-        return -1;
-    }
-    size_t required = FRAME_HEADER_LEN + frame->data_length + FRAME_CHECKSUM_LEN;
-    if (buffer_len < required) {
-        return -1;
-    }
-
-    size_t offset = 0;
-    buffer[offset++] = (uint8_t)frame->type;
-
-    frame_copy_field_padded(frame->origin, buffer + offset, FRAME_ORIGIN_LEN);
-    offset += FRAME_ORIGIN_LEN;
-    frame_copy_field_padded(frame->destination, buffer + offset, FRAME_DEST_LEN);
-    offset += FRAME_DEST_LEN;
-
-    buffer[offset++] = (uint8_t)((frame->data_length >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)(frame->data_length & 0xFF);
-
-    if (frame->data_length > 0) {
-        memcpy(buffer + offset, frame->data, frame->data_length);
-        offset += frame->data_length;
-    }
-
-    uint16_t checksum = frame_compute_checksum_bytes(buffer, offset);
-    buffer[offset++] = (uint8_t)((checksum >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)(checksum & 0xFF);
-
-    if (out_len != NULL) {
-        *out_len = offset;
-    }
-    return 0;
-}
-
-FrameParseResult frame_deserialize(const uint8_t* buffer, size_t length, CitadelFrame* frame, size_t* consumed_bytes) {
-    if (consumed_bytes != NULL) {
-        *consumed_bytes = 0;
-    }
-    if (buffer == NULL || frame == NULL) {
-        return FRAME_PARSE_INVALID;
-    }
-
-    if (length < FRAME_HEADER_LEN + FRAME_CHECKSUM_LEN) {
-        return FRAME_PARSE_NEED_MORE;
-    }
-
-    size_t offset = 0;
-    frame->type = (FrameType)buffer[offset++];
-
-    frame_extract_field(buffer + offset, FRAME_ORIGIN_LEN, frame->origin, sizeof(frame->origin));
-    offset += FRAME_ORIGIN_LEN;
-    frame_extract_field(buffer + offset, FRAME_DEST_LEN, frame->destination, sizeof(frame->destination));
-    offset += FRAME_DEST_LEN;
-
-    uint16_t data_len = (uint16_t)((buffer[offset] << 8) | buffer[offset + 1]);
-    offset += 2;
-
-    if (data_len > FRAME_MAX_DATA) {
-        return FRAME_PARSE_INVALID;
-    }
-
-    size_t total_needed = FRAME_HEADER_LEN + data_len + FRAME_CHECKSUM_LEN;
-    if (length < total_needed) {
-        return FRAME_PARSE_NEED_MORE;
-    }
-
-    frame->data_length = data_len;
-    if (data_len > 0) {
-        memcpy(frame->data, buffer + offset, data_len);
-    }
-    offset += data_len;
-
-    frame->checksum = (uint16_t)((buffer[offset] << 8) | buffer[offset + 1]);
-    offset += 2;
-
-    uint16_t computed = frame_compute_checksum_bytes(buffer, total_needed - FRAME_CHECKSUM_LEN);
-    if (frame->checksum != computed) {
-        if (consumed_bytes != NULL) {
-            *consumed_bytes = total_needed;
-        }
-        return FRAME_PARSE_BAD_CHECKSUM;
-    }
-
-    if (consumed_bytes != NULL) {
-        *consumed_bytes = total_needed;
-    }
-    return FRAME_PARSE_OK;
-}
-
-const char* frame_type_to_string(FrameType type) {
-    switch (type) {
-        case FRAME_TYPE_PLEDGE: return "PLEDGE";
-        case FRAME_TYPE_PLEDGE_RESPONSE: return "PLEDGE_RESP";
-        case FRAME_TYPE_LIST_REQUEST: return "LIST_REQ";
-        case FRAME_TYPE_LIST_RESPONSE: return "LIST_RESP";
-        case FRAME_TYPE_ORDER_HEADER: return "ORDER_HDR";
-        case FRAME_TYPE_ORDER_DATA: return "ORDER_DATA";
-        case FRAME_TYPE_ORDER_RESPONSE: return "ORDER_RESP";
-        case FRAME_TYPE_DISCONNECT: return "DISCONNECT";
-        case FRAME_TYPE_ERROR_UNKNOWN: return "ERR_UNKNOWN";
-        case FRAME_TYPE_ERROR_UNAUTHORIZED: return "ERR_AUTH";
-        case FRAME_TYPE_ACK_FILE: return "ACK_FILE";
-        case FRAME_TYPE_ACK_MD5: return "ACK_MD5";
-        case FRAME_TYPE_NACK: return "NACK";
-        default: return "UNKNOWN";
-    }
-}
-
-void frame_log_summary(const char* prefix, const CitadelFrame* frame) {
-    if (frame == NULL) return;
-    if (prefix != NULL) {
-        write_str(STDOUT_FILENO, prefix);
-        write_str(STDOUT_FILENO, ": ");
-    }
-    write_str(STDOUT_FILENO, frame_type_to_string(frame->type));
-    write_str(STDOUT_FILENO, " | origin=");
-    write_str(STDOUT_FILENO, frame->origin);
-    write_str(STDOUT_FILENO, " dest=");
-    write_str(STDOUT_FILENO, frame->destination);
-    write_str(STDOUT_FILENO, " len=");
-    char len_buf[16];
-    int_to_str(frame->data_length, len_buf);
-    write_str(STDOUT_FILENO, len_buf);
-    write_str(STDOUT_FILENO, "\n");
-}
-
-void frame_buffer_init(FrameBuffer* fb) {
-    if (fb == NULL) return;
-    fb->length = 0;
-}
-
-void frame_buffer_reset(FrameBuffer* fb) {
-    if (fb == NULL) return;
-    fb->length = 0;
-}
-
-static void frame_buffer_consume(FrameBuffer* fb, size_t bytes) {
-    if (fb == NULL || bytes == 0 || fb->length == 0) return;
-    if (bytes >= fb->length) {
-        fb->length = 0;
-        return;
-    }
-    memmove(fb->data, fb->data + bytes, fb->length - bytes);
-    fb->length -= bytes;
-}
-
-int frame_buffer_append(FrameBuffer* fb, const uint8_t* data, size_t length) {
-    if (fb == NULL || data == NULL) return -1;
-    if (length == 0) return 0;
-    if (fb->length + length > FRAME_BUFFER_CAPACITY) {
-        return -1;
-    }
-    memcpy(fb->data + fb->length, data, length);
-    fb->length += length;
-    return 0;
-}
-
-FrameParseResult frame_buffer_extract(FrameBuffer* fb, CitadelFrame* frame, size_t* consumed_bytes) {
-    if (fb == NULL || frame == NULL) {
-        return FRAME_PARSE_INVALID;
-    }
-    if (fb->length == 0) {
-        if (consumed_bytes) {
-            *consumed_bytes = 0;
-        }
-        return FRAME_PARSE_NEED_MORE;
-    }
-
-    size_t consumed = 0;
-    FrameParseResult result = frame_deserialize(fb->data, fb->length, frame, &consumed);
-    if (result == FRAME_PARSE_OK) {
-        frame_buffer_consume(fb, consumed);
-        if (consumed_bytes) {
-            *consumed_bytes = consumed;
-        }
-        return FRAME_PARSE_OK;
-    }
-    if (result == FRAME_PARSE_BAD_CHECKSUM || result == FRAME_PARSE_INVALID) {
-        frame_buffer_reset(fb);
-    }
-    if (consumed_bytes) {
-        *consumed_bytes = consumed;
-    }
-    return result;
-}
-
-// ========== Routing helpers ==========
-
-static Route* maester_find_route(Maester* maester, const char* realm) {
-    if (maester == NULL || realm == NULL) return NULL;
-    for (int i = 0; i < maester->num_routes; i++) {
-        if (my_strcasecmp(maester->routes[i].realm, realm) == 0) {
-            return &maester->routes[i];
-        }
-    }
-    return NULL;
-}
-
-static Route* maester_find_default_route(Maester* maester) {
-    if (maester == NULL) return NULL;
-    for (int i = 0; i < maester->num_routes; i++) {
-        if (my_strcasecmp(maester->routes[i].realm, ROUTE_DEFAULT) == 0) {
-            return &maester->routes[i];
-        }
-    }
-    return NULL;
-}
-
-static int maester_route_is_known(const Route* route) {
-    if (route == NULL) return 0;
-    if (my_strcmp(route->ip, "*.*.*.*") == 0) {
-        return 0;
-    }
-    return route->port > 0;
-}
-
-static Route* maester_resolve_route(Maester* maester, const char* destination, int* used_default) {
-    if (used_default != NULL) {
-        *used_default = 0;
-    }
-    Route* direct = maester_find_route(maester, destination);
-    if (direct != NULL && maester_route_is_known(direct)) {
-        return direct;
-    }
-    Route* def = maester_find_default_route(maester);
-    if (def != NULL && maester_route_is_known(def)) {
-        if (used_default != NULL) {
-            *used_default = 1;
-        }
-        return def;
-    }
-    return NULL;
-}
-
-static void maester_log_route_resolution(const char* destination, const Route* route, int used_default) {
-    if (destination == NULL || route == NULL) return;
-    write_str(STDOUT_FILENO, "Routing ");
-    write_str(STDOUT_FILENO, destination);
-    write_str(STDOUT_FILENO, used_default ? " via DEFAULT hop " : " directly ");
-    write_str(STDOUT_FILENO, "through ");
-    write_str(STDOUT_FILENO, route->realm);
-    write_str(STDOUT_FILENO, " (");
-    write_str(STDOUT_FILENO, route->ip);
-    write_str(STDOUT_FILENO, ":");
-    char buf[16];
-    int_to_str(route->port, buf);
-    write_str(STDOUT_FILENO, buf);
-    write_str(STDOUT_FILENO, ").\n");
-}
-
-// ========== Connection helpers ==========
-
-static ConnectionEntry* maester_find_connection(Maester* maester, const char* realm) {
-    if (maester == NULL || realm == NULL) return NULL;
-    for (int i = 0; i < maester->num_connections; i++) {
-        if (my_strcasecmp(maester->connections[i].peer_realm, realm) == 0) {
-            return &maester->connections[i];
-        }
-    }
-    return NULL;
-}
-
-static ConnectionEntry* maester_add_connection_entry(Maester* maester) {
-    if (maester == NULL) return NULL;
-    if (maester->num_connections >= maester->connections_capacity) {
-        int new_capacity = (maester->connections_capacity == 0) ? 4 : maester->connections_capacity * 2;
-        ConnectionEntry* new_entries = (ConnectionEntry*)realloc(maester->connections, new_capacity * sizeof(ConnectionEntry));
-        if (new_entries == NULL) {
-            write_str(STDERR_FILENO, "Error: Unable to expand connection table.\n");
-            return NULL;
-        }
-        maester->connections = new_entries;
-        maester->connections_capacity = new_capacity;
-    }
-    ConnectionEntry* entry = &maester->connections[maester->num_connections++];
-    memset(entry, 0, sizeof(ConnectionEntry));
-    entry->sockfd = -1;
-    frame_buffer_init(&entry->recv_buffer);
-    frame_buffer_init(&entry->send_buffer);
-    return entry;
-}
-
-static void maester_close_connection_entry(ConnectionEntry* entry) {
-    if (entry == NULL) return;
-    if (entry->sockfd >= 0) {
-        close(entry->sockfd);
-        entry->sockfd = -1;
-    }
-    entry->peer_realm[0] = '\0';
-    entry->peer_ip[0] = '\0';
-    entry->peer_port = 0;
-    entry->last_used = 0;
-    memset(&entry->addr, 0, sizeof(entry->addr));
-    frame_buffer_reset(&entry->recv_buffer);
-    frame_buffer_reset(&entry->send_buffer);
-}
-
-static ConnectionEntry* maester_get_or_open_connection(Maester* maester, const char* realm, const char* ip, int port) {
-    if (maester == NULL || realm == NULL || ip == NULL || port <= 0) {
-        return NULL;
-    }
-
-    ConnectionEntry* existing = maester_find_connection(maester, realm);
-    if (existing != NULL && existing->sockfd >= 0) {
-        existing->last_used = time(NULL);
-        return existing;
-    }
-
-    ConnectionEntry* entry = maester_add_connection_entry(maester);
-    if (entry == NULL) {
-        return NULL;
-    }
-
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        write_str(STDERR_FILENO, "Error: Unable to create client socket.\n");
-        maester_close_connection_entry(entry);
-        maester->num_connections--;
-        return NULL;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
-        write_str(STDERR_FILENO, "Error: Invalid IP when opening connection.\n");
-        close(fd);
-        maester_close_connection_entry(entry);
-        maester->num_connections--;
-        return NULL;
-    }
-
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        write_str(STDERR_FILENO, "Error: connect() failed when reaching ");
-        write_str(STDERR_FILENO, realm);
-        write_str(STDERR_FILENO, ".\n");
-        close(fd);
-        maester_close_connection_entry(entry);
-        maester->num_connections--;
-        return NULL;
-    }
-
-    if (set_socket_nonblocking(fd) < 0) {
-        write_str(STDERR_FILENO, "Warning: failed to set non-blocking mode on connection socket.\n");
-    }
-
-    entry->sockfd = fd;
-    entry->addr = addr;
-    my_strcpy(entry->peer_realm, realm);
-    my_strcpy(entry->peer_ip, ip);
-    entry->peer_port = port;
-    entry->last_used = time(NULL);
-    char port_buf[16];
-    int_to_str(port, port_buf);
-    write_str(STDOUT_FILENO, "Connected to ");
-    write_str(STDOUT_FILENO, realm);
-    write_str(STDOUT_FILENO, " (");
-    write_str(STDOUT_FILENO, ip);
-    write_str(STDOUT_FILENO, ":");
-    write_str(STDOUT_FILENO, port_buf);
-    write_str(STDOUT_FILENO, ").\n");
-    return entry;
-}
-
-static void maester_compact_connections(Maester* maester) {
-    if (maester == NULL || maester->connections == NULL) return;
-    int write_idx = 0;
-    for (int i = 0; i < maester->num_connections; i++) {
-        if (maester->connections[i].sockfd >= 0) {
-            if (write_idx != i) {
-                maester->connections[write_idx] = maester->connections[i];
-            }
-            write_idx++;
-        }
-    }
-    maester->num_connections = write_idx;
-}
-
-static void maester_close_all_connections(Maester* maester) {
-    if (maester == NULL || maester->connections == NULL) return;
-    for (int i = 0; i < maester->num_connections; i++) {
-        maester_close_connection_entry(&maester->connections[i]);
-    }
-    maester->num_connections = 0;
-}
-
 static void maester_receive_placeholder(Maester* maester, ConnectionEntry* entry) {
-    (void)maester;
     if (entry == NULL || entry->sockfd < 0) return;
     uint8_t buffer[FRAME_MAX_SIZE];
     ssize_t bytes = read(entry->sockfd, buffer, sizeof(buffer));
@@ -1042,7 +574,7 @@ static void maester_receive_placeholder(Maester* maester, ConnectionEntry* entry
         size_t consumed = 0;
         FrameParseResult result;
         while ((result = frame_buffer_extract(&entry->recv_buffer, &frame, &consumed)) == FRAME_PARSE_OK) {
-            frame_log_summary("Received frame", &frame);
+            maester_process_incoming_frame(maester, entry, &frame);
         }
         if (result == FRAME_PARSE_BAD_CHECKSUM) {
             write_str(STDERR_FILENO, "Warning: Received frame with invalid checksum.\n");
@@ -1069,8 +601,38 @@ static void maester_handle_connection_event(Maester* maester, ConnectionEntry* e
         maester_close_connection_entry(entry);
         return;
     }
+    if ((revents & POLLOUT) && entry->sockfd >= 0) {
+        maester_flush_send_buffer(entry);
+        if (entry->sockfd < 0) {
+            return;
+        }
+    }
     if (revents & POLLIN) {
         maester_receive_placeholder(maester, entry);
+    }
+}
+
+static void maester_process_incoming_frame(Maester* maester, ConnectionEntry* entry, const CitadelFrame* frame) {
+    (void)entry;
+    frame_log_summary("Received frame", frame);
+    if (maester == NULL || frame == NULL) {
+        return;
+    }
+    if (frame->type == FRAME_TYPE_PLEDGE_RESPONSE &&
+        maester_mission_is_active(maester) &&
+        maester->active_mission.type == FRAME_TYPE_PLEDGE) {
+        char message[128];
+        int data_len = (frame->data_length < FRAME_MAX_DATA) ? frame->data_length : FRAME_MAX_DATA;
+        char response[64];
+        int copy_len = (data_len < (int)sizeof(response) - 1) ? data_len : (int)sizeof(response) - 1;
+        memcpy(response, frame->data, copy_len);
+        response[copy_len] = '\0';
+        int written = snprintf(message, sizeof(message), "Alliance response from %s: %s",
+                               frame->origin, response);
+        if (written < 0 || written >= (int)sizeof(message)) {
+            message[sizeof(message) - 1] = '\0';
+        }
+        maester_mission_finish(maester, message);
     }
 }
 
@@ -1327,6 +889,9 @@ static void maester_event_loop(Maester* maester) {
             }
             pollfds[poll_index].fd = maester->connections[i].sockfd;
             pollfds[poll_index].events = POLLIN;
+            if (maester_connection_has_pending_send(&maester->connections[i])) {
+                pollfds[poll_index].events |= POLLOUT;
+            }
             pollfds[poll_index].revents = 0;
             conn_map[conn_count++] = &maester->connections[i];
             poll_index++;
