@@ -20,6 +20,19 @@ static void frame_copy_field_padded(const char* src, uint8_t* dst, size_t field_
 static void frame_extract_field(const uint8_t* src, size_t field_len, char* dst, size_t dst_len);
 static void frame_buffer_consume(FrameBuffer* fb, size_t bytes);
 static void frame_store_field(char* dst, size_t dst_len, const char* src);
+static Route* maester_find_route(Maester* maester, const char* realm);
+static Route* maester_find_default_route(Maester* maester);
+static int    maester_route_is_known(const Route* route);
+static Route* maester_resolve_route(Maester* maester, const char* destination, int* used_default);
+static void   maester_log_route_resolution(const char* destination, const Route* route, int used_default);
+static ConnectionEntry* maester_find_connection(Maester* maester, const char* realm);
+static ConnectionEntry* maester_add_connection_entry(Maester* maester);
+static void   maester_close_connection_entry(ConnectionEntry* entry);
+static ConnectionEntry* maester_get_or_open_connection(Maester* maester, const char* realm, const char* ip, int port);
+static void   maester_compact_connections(Maester* maester);
+static void   maester_close_all_connections(Maester* maester);
+static void   maester_handle_connection_event(Maester* maester, ConnectionEntry* entry, short revents);
+static void   maester_receive_placeholder(Maester* maester, ConnectionEntry* entry);
 
 Maester* create_maester(const char* realm_name, const char* folder_path, const char* ip, int port) {
     Maester* maester = (Maester*)malloc(sizeof(Maester));
@@ -47,6 +60,7 @@ Maester* create_maester(const char* realm_name, const char* folder_path, const c
     maester->envoy_missions = NULL;
     maester->connections = NULL;
     maester->num_connections = 0;
+    maester->connections_capacity = 0;
     maester->listen_fd = -1;
     maester->listener_thread = 0;
     maester->shutting_down = 0;
@@ -249,6 +263,13 @@ Maester* load_maester_config(const char* config_file, const char* stock_file) {
 void free_maester(Maester* maester) {
     if (maester == NULL) return;
 
+    maester_close_all_connections(maester);
+    if (maester->connections != NULL) {
+        free(maester->connections);
+        maester->connections = NULL;
+        maester->connections_capacity = 0;
+    }
+
     if (maester->listen_fd >= 0) {
         close(maester->listen_fd);
         maester->listen_fd = -1;
@@ -264,10 +285,6 @@ void free_maester(Maester* maester) {
 
     if (maester->envoy_missions != NULL) {
         free(maester->envoy_missions);
-    }
-
-    if (maester->connections != NULL) {
-        free(maester->connections);
     }
 
     if (maester->routes != NULL) {
@@ -347,7 +364,22 @@ void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {
     if (maester == NULL || realm == NULL) return;
 
     (void)sigil;
-    (void)realm;
+
+    int used_default = 0;
+    Route* route = maester_resolve_route(maester, realm, &used_default);
+    if (route == NULL) {
+        write_str(STDOUT_FILENO, "Unable to find a valid route to ");
+        write_str(STDOUT_FILENO, realm);
+        write_str(STDOUT_FILENO, ".\n");
+        return;
+    }
+
+    maester_log_route_resolution(realm, route, used_default);
+
+    if (maester_get_or_open_connection(maester, route->realm, route->ip, route->port) == NULL) {
+        write_str(STDOUT_FILENO, "Failed to prepare connection for pledge.\n");
+        return;
+    }
 
     write_str(STDOUT_FILENO, "Command OK\n");
 }
@@ -631,6 +663,253 @@ FrameParseResult frame_buffer_extract(FrameBuffer* fb, CitadelFrame* frame, size
     return result;
 }
 
+// ========== Routing helpers ==========
+
+static Route* maester_find_route(Maester* maester, const char* realm) {
+    if (maester == NULL || realm == NULL) return NULL;
+    for (int i = 0; i < maester->num_routes; i++) {
+        if (my_strcasecmp(maester->routes[i].realm, realm) == 0) {
+            return &maester->routes[i];
+        }
+    }
+    return NULL;
+}
+
+static Route* maester_find_default_route(Maester* maester) {
+    if (maester == NULL) return NULL;
+    for (int i = 0; i < maester->num_routes; i++) {
+        if (my_strcasecmp(maester->routes[i].realm, ROUTE_DEFAULT) == 0) {
+            return &maester->routes[i];
+        }
+    }
+    return NULL;
+}
+
+static int maester_route_is_known(const Route* route) {
+    if (route == NULL) return 0;
+    if (my_strcmp(route->ip, "*.*.*.*") == 0) {
+        return 0;
+    }
+    return route->port > 0;
+}
+
+static Route* maester_resolve_route(Maester* maester, const char* destination, int* used_default) {
+    if (used_default != NULL) {
+        *used_default = 0;
+    }
+    Route* direct = maester_find_route(maester, destination);
+    if (direct != NULL && maester_route_is_known(direct)) {
+        return direct;
+    }
+    Route* def = maester_find_default_route(maester);
+    if (def != NULL && maester_route_is_known(def)) {
+        if (used_default != NULL) {
+            *used_default = 1;
+        }
+        return def;
+    }
+    return NULL;
+}
+
+static void maester_log_route_resolution(const char* destination, const Route* route, int used_default) {
+    if (destination == NULL || route == NULL) return;
+    write_str(STDOUT_FILENO, "Routing ");
+    write_str(STDOUT_FILENO, destination);
+    write_str(STDOUT_FILENO, used_default ? " via DEFAULT hop " : " directly ");
+    write_str(STDOUT_FILENO, "through ");
+    write_str(STDOUT_FILENO, route->realm);
+    write_str(STDOUT_FILENO, " (");
+    write_str(STDOUT_FILENO, route->ip);
+    write_str(STDOUT_FILENO, ":");
+    char buf[16];
+    int_to_str(route->port, buf);
+    write_str(STDOUT_FILENO, buf);
+    write_str(STDOUT_FILENO, ").\n");
+}
+
+// ========== Connection helpers ==========
+
+static ConnectionEntry* maester_find_connection(Maester* maester, const char* realm) {
+    if (maester == NULL || realm == NULL) return NULL;
+    for (int i = 0; i < maester->num_connections; i++) {
+        if (my_strcasecmp(maester->connections[i].peer_realm, realm) == 0) {
+            return &maester->connections[i];
+        }
+    }
+    return NULL;
+}
+
+static ConnectionEntry* maester_add_connection_entry(Maester* maester) {
+    if (maester == NULL) return NULL;
+    if (maester->num_connections >= maester->connections_capacity) {
+        int new_capacity = (maester->connections_capacity == 0) ? 4 : maester->connections_capacity * 2;
+        ConnectionEntry* new_entries = (ConnectionEntry*)realloc(maester->connections, new_capacity * sizeof(ConnectionEntry));
+        if (new_entries == NULL) {
+            write_str(STDERR_FILENO, "Error: Unable to expand connection table.\n");
+            return NULL;
+        }
+        maester->connections = new_entries;
+        maester->connections_capacity = new_capacity;
+    }
+    ConnectionEntry* entry = &maester->connections[maester->num_connections++];
+    memset(entry, 0, sizeof(ConnectionEntry));
+    entry->sockfd = -1;
+    frame_buffer_init(&entry->recv_buffer);
+    frame_buffer_init(&entry->send_buffer);
+    return entry;
+}
+
+static void maester_close_connection_entry(ConnectionEntry* entry) {
+    if (entry == NULL) return;
+    if (entry->sockfd >= 0) {
+        close(entry->sockfd);
+        entry->sockfd = -1;
+    }
+    entry->peer_realm[0] = '\0';
+    entry->peer_ip[0] = '\0';
+    entry->peer_port = 0;
+    entry->last_used = 0;
+    memset(&entry->addr, 0, sizeof(entry->addr));
+    frame_buffer_reset(&entry->recv_buffer);
+    frame_buffer_reset(&entry->send_buffer);
+}
+
+static ConnectionEntry* maester_get_or_open_connection(Maester* maester, const char* realm, const char* ip, int port) {
+    if (maester == NULL || realm == NULL || ip == NULL || port <= 0) {
+        return NULL;
+    }
+
+    ConnectionEntry* existing = maester_find_connection(maester, realm);
+    if (existing != NULL && existing->sockfd >= 0) {
+        existing->last_used = time(NULL);
+        return existing;
+    }
+
+    ConnectionEntry* entry = maester_add_connection_entry(maester);
+    if (entry == NULL) {
+        return NULL;
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        write_str(STDERR_FILENO, "Error: Unable to create client socket.\n");
+        maester_close_connection_entry(entry);
+        maester->num_connections--;
+        return NULL;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
+        write_str(STDERR_FILENO, "Error: Invalid IP when opening connection.\n");
+        close(fd);
+        maester_close_connection_entry(entry);
+        maester->num_connections--;
+        return NULL;
+    }
+
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        write_str(STDERR_FILENO, "Error: connect() failed when reaching ");
+        write_str(STDERR_FILENO, realm);
+        write_str(STDERR_FILENO, ".\n");
+        close(fd);
+        maester_close_connection_entry(entry);
+        maester->num_connections--;
+        return NULL;
+    }
+
+    if (set_socket_nonblocking(fd) < 0) {
+        write_str(STDERR_FILENO, "Warning: failed to set non-blocking mode on connection socket.\n");
+    }
+
+    entry->sockfd = fd;
+    entry->addr = addr;
+    my_strcpy(entry->peer_realm, realm);
+    my_strcpy(entry->peer_ip, ip);
+    entry->peer_port = port;
+    entry->last_used = time(NULL);
+    char port_buf[16];
+    int_to_str(port, port_buf);
+    write_str(STDOUT_FILENO, "Connected to ");
+    write_str(STDOUT_FILENO, realm);
+    write_str(STDOUT_FILENO, " (");
+    write_str(STDOUT_FILENO, ip);
+    write_str(STDOUT_FILENO, ":");
+    write_str(STDOUT_FILENO, port_buf);
+    write_str(STDOUT_FILENO, ").\n");
+    return entry;
+}
+
+static void maester_compact_connections(Maester* maester) {
+    if (maester == NULL || maester->connections == NULL) return;
+    int write_idx = 0;
+    for (int i = 0; i < maester->num_connections; i++) {
+        if (maester->connections[i].sockfd >= 0) {
+            if (write_idx != i) {
+                maester->connections[write_idx] = maester->connections[i];
+            }
+            write_idx++;
+        }
+    }
+    maester->num_connections = write_idx;
+}
+
+static void maester_close_all_connections(Maester* maester) {
+    if (maester == NULL || maester->connections == NULL) return;
+    for (int i = 0; i < maester->num_connections; i++) {
+        maester_close_connection_entry(&maester->connections[i]);
+    }
+    maester->num_connections = 0;
+}
+
+static void maester_receive_placeholder(Maester* maester, ConnectionEntry* entry) {
+    (void)maester;
+    if (entry == NULL || entry->sockfd < 0) return;
+    uint8_t buffer[FRAME_MAX_SIZE];
+    ssize_t bytes = read(entry->sockfd, buffer, sizeof(buffer));
+    if (bytes > 0) {
+        if (frame_buffer_append(&entry->recv_buffer, buffer, (size_t)bytes) != 0) {
+            write_str(STDERR_FILENO, "Warning: receive buffer overflow, dropping data.\n");
+            frame_buffer_reset(&entry->recv_buffer);
+            return;
+        }
+        CitadelFrame frame;
+        size_t consumed = 0;
+        FrameParseResult result;
+        while ((result = frame_buffer_extract(&entry->recv_buffer, &frame, &consumed)) == FRAME_PARSE_OK) {
+            frame_log_summary("Received frame", &frame);
+        }
+        if (result == FRAME_PARSE_BAD_CHECKSUM) {
+            write_str(STDERR_FILENO, "Warning: Received frame with invalid checksum.\n");
+        }
+    } else if (bytes == 0) {
+        write_str(STDOUT_FILENO, "Peer closed connection: ");
+        write_str(STDOUT_FILENO, entry->peer_realm);
+        write_str(STDOUT_FILENO, "\n");
+        maester_close_connection_entry(entry);
+    } else {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            write_str(STDERR_FILENO, "Error reading from peer connection. Closing it.\n");
+            maester_close_connection_entry(entry);
+        }
+    }
+}
+
+static void maester_handle_connection_event(Maester* maester, ConnectionEntry* entry, short revents) {
+    if (entry == NULL) return;
+    if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        write_str(STDERR_FILENO, "Connection error with peer ");
+        write_str(STDERR_FILENO, entry->peer_realm);
+        write_str(STDERR_FILENO, ". Closing.\n");
+        maester_close_connection_entry(entry);
+        return;
+    }
+    if (revents & POLLIN) {
+        maester_receive_placeholder(maester, entry);
+    }
+}
 
 // ========== Module-local state for CTRL+C ==========
 static volatile sig_atomic_t g_should_exit = 0;
@@ -825,27 +1104,57 @@ static void maester_accept_placeholder(Maester* maester) {
 static void maester_event_loop(Maester* maester) {
     if (maester == NULL) return;
 
-    struct pollfd pollfds[2];
     int need_prompt = 1;
     char input[256];
 
-    pollfds[0].fd = STDIN_FILENO;
-    pollfds[0].events = POLLIN;
-    pollfds[0].revents = 0;
-
     while (!g_should_exit && !maester->shutting_down) {
+        maester_compact_connections(maester);
+
         if (need_prompt) {
             write_str(STDOUT_FILENO, "$ ");
             need_prompt = 0;
         }
 
-        int nfds = 1;
+        int poll_capacity = 1; // stdin
         if (maester->listen_fd >= 0) {
-            pollfds[1].fd = maester->listen_fd;
-            pollfds[1].events = POLLIN;
-            pollfds[1].revents = 0;
-            nfds = 2;
+            poll_capacity++;
         }
+        poll_capacity += maester->num_connections;
+        if (poll_capacity < 2) poll_capacity = 2;
+
+        struct pollfd pollfds[poll_capacity];
+        int poll_index = 0;
+
+        pollfds[poll_index].fd = STDIN_FILENO;
+        pollfds[poll_index].events = POLLIN;
+        pollfds[poll_index].revents = 0;
+        poll_index++;
+
+        int listen_index = -1;
+        if (maester->listen_fd >= 0) {
+            listen_index = poll_index;
+            pollfds[poll_index].fd = maester->listen_fd;
+            pollfds[poll_index].events = POLLIN;
+            pollfds[poll_index].revents = 0;
+            poll_index++;
+        }
+
+        int conn_slots = (maester->num_connections > 0) ? maester->num_connections : 1;
+        ConnectionEntry* conn_map[conn_slots];
+        int conn_start = poll_index;
+        int conn_count = 0;
+        for (int i = 0; i < maester->num_connections; i++) {
+            if (maester->connections[i].sockfd < 0) {
+                continue;
+            }
+            pollfds[poll_index].fd = maester->connections[i].sockfd;
+            pollfds[poll_index].events = POLLIN;
+            pollfds[poll_index].revents = 0;
+            conn_map[conn_count++] = &maester->connections[i];
+            poll_index++;
+        }
+
+        int nfds = poll_index;
 
         int poll_result = poll(pollfds, nfds, 500);
         if (poll_result < 0) {
@@ -885,12 +1194,24 @@ static void maester_event_loop(Maester* maester) {
             g_should_exit = 1;
         }
 
-        if (nfds == 2 && (pollfds[1].revents & POLLIN)) {
-            maester_accept_placeholder(maester);
-            need_prompt = 1;
-        } else if (nfds == 2 && (pollfds[1].revents & (POLLHUP | POLLERR))) {
-            write_str(STDERR_FILENO, "Listener socket reported an error.\n");
+        if (listen_index != -1 && listen_index < nfds) {
+            if (pollfds[listen_index].revents & POLLIN) {
+                maester_accept_placeholder(maester);
+                need_prompt = 1;
+            } else if (pollfds[listen_index].revents & (POLLHUP | POLLERR)) {
+                write_str(STDERR_FILENO, "Listener socket reported an error.\n");
+            }
         }
+
+        for (int i = 0; i < conn_count; i++) {
+            ConnectionEntry* entry = conn_map[i];
+            short revents = pollfds[conn_start + i].revents;
+            if (revents != 0 && entry != NULL) {
+                maester_handle_connection_event(maester, entry, revents);
+            }
+        }
+
+        maester_compact_connections(maester);
     }
 
     maester->shutting_down = 1;
@@ -915,6 +1236,7 @@ int maester_run(const char* config_file, const char* stock_file) {
     }
 
     maester_event_loop(maester);
+    maester_close_all_connections(maester);
 
     write_str(STDOUT_FILENO, "\nCleaning up resources...\n");
     free_maester(maester);

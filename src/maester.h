@@ -98,13 +98,6 @@ typedef struct {
 } EnvoyMission;
 
 typedef struct {
-    int                sockfd;
-    char               peer_realm[REALM_NAME_MAX];
-    struct sockaddr_in addr;
-    time_t             last_used;
-} ConnectionEntry;
-
-typedef struct {
     CitadelFrame   *buffer;
     size_t          capacity;
     size_t          count;
@@ -133,6 +126,17 @@ typedef struct {
     size_t  length;
 } FrameBuffer;
 
+typedef struct {
+    int                sockfd;
+    char               peer_realm[REALM_NAME_MAX];
+    char               peer_ip[IP_ADDR_MAX];
+    int                peer_port;
+    struct sockaddr_in addr;
+    time_t             last_used;
+    FrameBuffer        recv_buffer;
+    FrameBuffer        send_buffer;
+} ConnectionEntry;
+
 typedef struct Maester {
     char realm_name[REALM_NAME_MAX];
     char folder_path[PATH_MAX_LEN];
@@ -149,6 +153,7 @@ typedef struct Maester {
     EnvoyMission*    envoy_missions;
     ConnectionEntry* connections;
     int              num_connections;
+    int              connections_capacity;
     FrameQueue       outbound_queue;
     int              listen_fd;
     pthread_t        listener_thread;
