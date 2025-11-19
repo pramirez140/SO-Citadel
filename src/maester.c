@@ -1067,6 +1067,118 @@ static void maester_event_loop(Maester* maester) {
     maester->shutting_down = 1;
 }
 
+// ============================================================================
+// Alliance Table Management
+// ============================================================================
+
+/**
+ * Find an alliance entry by realm name.
+ * Returns pointer to entry if found, NULL otherwise.
+ */
+static AllianceEntry* maester_find_alliance(Maester* maester, const char* realm) {
+    if (maester == NULL || realm == NULL || maester->alliances == NULL) {
+        return NULL;
+    }
+
+    for (int i = 0; i < maester->num_alliances; i++) {
+        if (my_strcasecmp(maester->alliances[i].realm, realm) == 0) {
+            return &maester->alliances[i];
+        }
+    }
+
+    return NULL;
+}
+
+/**
+ * Add or update an alliance entry.
+ * If the realm already exists, updates its state.
+ * Otherwise, adds a new entry.
+ * Returns 0 on success, -1 on failure.
+ */
+static int maester_add_or_update_alliance(Maester* maester, const char* realm,
+                                          const char* ip, int port, AllianceState state) {
+    if (maester == NULL || realm == NULL) {
+        return -1;
+    }
+
+    // Try to find existing entry
+    AllianceEntry* existing = maester_find_alliance(maester, realm);
+    if (existing != NULL) {
+        // Update existing entry
+        existing->state = state;
+        existing->last_status = time(NULL);
+        if (ip != NULL) {
+            my_strcpy(existing->ip, ip);
+        }
+        if (port > 0) {
+            existing->port = port;
+        }
+        return 0;
+    }
+
+    // Add new entry - expand array if needed
+    #define MAX_ALLIANCES 64
+    if (maester->num_alliances >= MAX_ALLIANCES) {
+        write_str(STDERR_FILENO, "Error: Maximum alliances limit reached.\n");
+        return -1;
+    }
+
+    if (maester->alliances == NULL) {
+        maester->alliances = (AllianceEntry*)malloc(sizeof(AllianceEntry) * MAX_ALLIANCES);
+        if (maester->alliances == NULL) {
+            return -1;
+        }
+    }
+
+    // Initialize new entry
+    AllianceEntry* new_entry = &maester->alliances[maester->num_alliances];
+    my_strcpy(new_entry->realm, realm);
+    if (ip != NULL) {
+        my_strcpy(new_entry->ip, ip);
+    } else {
+        new_entry->ip[0] = '\0';
+    }
+    new_entry->port = port;
+    new_entry->state = state;
+    new_entry->last_status = time(NULL);
+
+    maester->num_alliances++;
+    return 0;
+}
+
+/**
+ * Get the current alliance state for a realm.
+ * Returns ALLIANCE_UNKNOWN if not found.
+ */
+static AllianceState maester_get_alliance_state(Maester* maester, const char* realm) {
+    AllianceEntry* entry = maester_find_alliance(maester, realm);
+    if (entry == NULL) {
+        return ALLIANCE_UNKNOWN;
+    }
+    return entry->state;
+}
+
+/**
+ * Check if a realm is actively allied (ALLIANCE_ACTIVE state).
+ * Returns 1 if allied, 0 otherwise.
+ */
+static int maester_is_allied(Maester* maester, const char* realm) {
+    return (maester_get_alliance_state(maester, realm) == ALLIANCE_ACTIVE);
+}
+
+/**
+ * Convert alliance state to human-readable string.
+ */
+static const char* alliance_state_to_string(AllianceState state) {
+    switch (state) {
+        case ALLIANCE_UNKNOWN:  return "UNKNOWN";
+        case ALLIANCE_PENDING:  return "PENDING";
+        case ALLIANCE_ACTIVE:   return "ALLIED";
+        case ALLIANCE_INACTIVE: return "INACTIVE";
+        default:                return "?";
+    }
+}
+
 int maester_run(const char* config_file, const char* stock_file) {
     // Setup CTRL+C handling for the CLI loop
     signal(SIGINT, maester_handle_sigint);
