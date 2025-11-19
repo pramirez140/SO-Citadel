@@ -521,10 +521,87 @@ void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {
 void cmd_pledge_respond(Maester* maester, const char* realm, const char* response) {
     if (maester == NULL || realm == NULL || response == NULL) return;
 
-    (void)realm;
-    (void)response;
+    // Check if response is ACCEPT or REJECT
+    int is_accept = (my_strcasecmp(response, "ACCEPT") == 0);
+    int is_reject = (my_strcasecmp(response, "REJECT") == 0);
 
-    write_str(STDOUT_FILENO, "Command OK\n");
+    if (!is_accept && !is_reject) {
+        write_str(STDOUT_FILENO, "Error: Response must be ACCEPT or REJECT\n");
+        return;
+    }
+
+    // Find the alliance entry
+    AllianceEntry* entry = maester_find_alliance(maester, realm);
+    if (entry == NULL) {
+        write_str(STDOUT_FILENO, "Error: No alliance request found from ");
+        write_str(STDOUT_FILENO, realm);
+        write_str(STDOUT_FILENO, "\n");
+        return;
+    }
+
+    // Check that the alliance is in PENDING state
+    if (entry->state != ALLIANCE_PENDING) {
+        write_str(STDOUT_FILENO, "Error: Alliance with ");
+        write_str(STDOUT_FILENO, realm);
+        write_str(STDOUT_FILENO, " is not in PENDING state (current: ");
+        write_str(STDOUT_FILENO, alliance_state_to_string(entry->state));
+        write_str(STDOUT_FILENO, ")\n");
+        return;
+    }
+
+    // Update alliance state
+    if (is_accept) {
+        entry->state = ALLIANCE_ACTIVE;
+        entry->last_status = time(NULL);
+        write_str(STDOUT_FILENO, "Alliance with ");
+        write_str(STDOUT_FILENO, realm);
+        write_str(STDOUT_FILENO, " ACCEPTED.\n");
+    } else {
+        entry->state = ALLIANCE_INACTIVE;
+        entry->last_status = time(NULL);
+        write_str(STDOUT_FILENO, "Alliance with ");
+        write_str(STDOUT_FILENO, realm);
+        write_str(STDOUT_FILENO, " REJECTED.\n");
+    }
+
+    // Send ALLIANCE_RESPONSE frame to the realm
+    // We need to find the route and connection to send the response
+    int used_default = 0;
+    Route* route = maester_resolve_route(maester, realm, &used_default);
+    if (route == NULL) {
+        write_str(STDERR_FILENO, "Warning: Cannot send response - no route to ");
+        write_str(STDERR_FILENO, realm);
+        write_str(STDERR_FILENO, "\n");
+        return;
+    }
+
+    // Get or create connection
+    ConnectionEntry* conn = maester_get_or_open_connection(maester, route->realm, route->ip, route->port);
+    if (conn == NULL) {
+        write_str(STDERR_FILENO, "Warning: Cannot send response - connection failed to ");
+        write_str(STDERR_FILENO, realm);
+        write_str(STDERR_FILENO, "\n");
+        return;
+    }
+
+    // Create and send ALLIANCE_RESPONSE frame
+    CitadelFrame response_frame;
+    frame_init(&response_frame, FRAME_TYPE_PLEDGE_RESPONSE, maester->realm_name, realm);
+
+    const char* response_msg = is_accept ? "ACCEPT" : "REJECT";
+    int msg_len = my_strlen(response_msg);
+    memcpy(response_frame.data, response_msg, msg_len);
+    response_frame.data_length = msg_len;
+
+    if (maester_send_frame(conn, &response_frame) == 0) {
+        write_str(STDOUT_FILENO, "Alliance response sent to ");
+        write_str(STDOUT_FILENO, realm);
+        write_str(STDOUT_FILENO, "\n");
+    } else {
+        write_str(STDERR_FILENO, "Error: Failed to send alliance response to ");
+        write_str(STDERR_FILENO, realm);
+        write_str(STDERR_FILENO, "\n");
+    }
 }
 
 void cmd_pledge_status(Maester* maester) {
