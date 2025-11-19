@@ -18,6 +18,11 @@ static int  maester_prepare_sigil_metadata(Maester* maester, const char* sigil, 
 static void   maester_handle_connection_event(Maester* maester, ConnectionEntry* entry, short revents);
 static void   maester_receive_placeholder(Maester* maester, ConnectionEntry* entry);
 static void   maester_process_incoming_frame(Maester* maester, ConnectionEntry* entry, const CitadelFrame* frame);
+static AllianceEntry* maester_find_alliance(Maester* maester, const char* realm);
+static int    maester_add_or_update_alliance(Maester* maester, const char* realm, const char* ip, int port, AllianceState state);
+static AllianceState maester_get_alliance_state(Maester* maester, const char* realm);
+static int    maester_is_allied(Maester* maester, const char* realm);
+static const char* alliance_state_to_string(AllianceState state);
 
 Maester* create_maester(const char* realm_name, const char* folder_path, const char* ip, int port) {
     Maester* maester = (Maester*)malloc(sizeof(Maester));
@@ -708,6 +713,30 @@ static void maester_process_incoming_frame(Maester* maester, ConnectionEntry* en
             message[sizeof(message) - 1] = '\0';
         }
         maester_mission_finish(maester, message);
+    }
+
+    // Handle incoming ALLIANCE_REQUEST (PLEDGE)
+    if (frame->type == FRAME_TYPE_PLEDGE) {
+        write_str(STDOUT_FILENO, "\n>>> Incoming ALLIANCE REQUEST from ");
+        write_str(STDOUT_FILENO, frame->origin);
+        write_str(STDOUT_FILENO, "\n");
+
+        // Parse the payload: "sigil_name&file_size&md5_hex&timestamp"
+        // (We receive this but don't need to validate it - it's for information only)
+
+        // Extract realm name from origin (format is "IP:Port")
+        // For now, we'll use the frame's origin field directly
+        // In Phase 3, we'll parse it to get the actual IP/port
+
+        // Add or update alliance table entry as PENDING
+        if (maester_add_or_update_alliance(maester, frame->origin, NULL, 0, ALLIANCE_PENDING) == 0) {
+            write_str(STDOUT_FILENO, "Alliance request recorded as PENDING.\n");
+            write_str(STDOUT_FILENO, "Use 'PLEDGE RESPOND ");
+            write_str(STDOUT_FILENO, frame->origin);
+            write_str(STDOUT_FILENO, " ACCEPT' to accept or 'REJECT' to decline.\n\n");
+        } else {
+            write_str(STDERR_FILENO, "Warning: Could not record alliance request.\n");
+        }
     }
 }
 
