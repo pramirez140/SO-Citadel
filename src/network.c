@@ -7,7 +7,7 @@ static Route* maester_find_route(Maester* maester, const char* realm);
 static Route* maester_find_default_route(Maester* maester);
 static int    maester_route_is_known(const Route* route);
 static ConnectionEntry* maester_find_connection(Maester* maester, const char* realm);
-static ConnectionEntry* maester_add_connection_entry(Maester* maester);
+ConnectionEntry* maester_add_connection_entry(Maester* maester);
 static int    set_socket_nonblocking(int fd);
 static int    maester_queue_bytes(ConnectionEntry* entry, const uint8_t* data, size_t length);
 
@@ -338,7 +338,7 @@ static ConnectionEntry* maester_find_connection(Maester* maester, const char* re
     return NULL;
 }
 
-static ConnectionEntry* maester_add_connection_entry(Maester* maester) {
+ConnectionEntry* maester_add_connection_entry(Maester* maester) {
     if (maester == NULL) return NULL;
     if (maester->num_connections >= maester->connections_capacity) {
         int new_capacity = (maester->connections_capacity == 0) ? 4 : maester->connections_capacity * 2;

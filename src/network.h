@@ -21,6 +21,7 @@ Route* maester_resolve_route(Maester* maester, const char* destination, int* use
 void   maester_log_route_resolution(const char* destination, const Route* route, int used_default);
 
 // Connections
+ConnectionEntry* maester_add_connection_entry(Maester* maester);
 ConnectionEntry* maester_get_or_open_connection(Maester* maester, const char* realm, const char* ip, int port);
 void             maester_compact_connections(Maester* maester);
 void             maester_close_all_connections(Maester* maester);
