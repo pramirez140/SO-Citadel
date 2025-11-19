@@ -75,10 +75,13 @@ int frame_serialize(const CitadelFrame* frame, uint8_t* buffer, size_t buffer_le
     if (frame->data_length > FRAME_MAX_DATA) {
         return -1;
     }
-    size_t required = FRAME_HEADER_LEN + frame->data_length + FRAME_CHECKSUM_LEN;
-    if (buffer_len < required) {
+    // Protocol requires FIXED 320-byte frames
+    if (buffer_len < FRAME_MAX_SIZE) {
         return -1;
     }
+
+    // Zero-initialize entire frame (provides padding)
+    memset(buffer, 0, FRAME_MAX_SIZE);
 
     size_t offset = 0;
     buffer[offset++] = (uint8_t)frame->type;
@@ -93,15 +96,16 @@ int frame_serialize(const CitadelFrame* frame, uint8_t* buffer, size_t buffer_le
 
     if (frame->data_length > 0) {
         memcpy(buffer + offset, frame->data, frame->data_length);
-        offset += frame->data_length;
     }
+    // Padding already set to zero by memset
 
-    uint16_t checksum = frame_compute_checksum_bytes(buffer, offset);
-    buffer[offset++] = (uint8_t)((checksum >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)(checksum & 0xFF);
+    // Checksum at FIXED position (bytes 318-319), computed over first 318 bytes
+    uint16_t checksum = frame_compute_checksum_bytes(buffer, 318);
+    buffer[318] = (uint8_t)((checksum >> 8) & 0xFF);
+    buffer[319] = (uint8_t)(checksum & 0xFF);
 
     if (out_len != NULL) {
-        *out_len = offset;
+        *out_len = FRAME_MAX_SIZE;
     }
     return 0;
 }
@@ -114,10 +118,12 @@ FrameParseResult frame_deserialize(const uint8_t* buffer, size_t length, Citadel
         return FRAME_PARSE_INVALID;
     }
 
-    if (length < FRAME_HEADER_LEN + FRAME_CHECKSUM_LEN) {
+    // Protocol specifies FIXED 320-byte frames
+    if (length < FRAME_MAX_SIZE) {
         return FRAME_PARSE_NEED_MORE;
     }
 
+    // Parse header fields
     size_t offset = 0;
     frame->type = (FrameType)buffer[offset++];
 
@@ -133,21 +139,17 @@ FrameParseResult frame_deserialize(const uint8_t* buffer, size_t length, Citadel
         return FRAME_PARSE_INVALID;
     }
 
-    size_t total_needed = FRAME_HEADER_LEN + data_len + FRAME_CHECKSUM_LEN;
-    if (length < total_needed) {
-        return FRAME_PARSE_NEED_MORE;
-    }
-
+    // Extract data (rest is padding until checksum)
     frame->data_length = data_len;
     if (data_len > 0) {
         memcpy(frame->data, buffer + offset, data_len);
     }
-    offset += data_len;
 
-    frame->checksum = (uint16_t)((buffer[offset] << 8) | buffer[offset + 1]);
-    offset += 2;
+    // Checksum is ALWAYS at fixed position (bytes 318-319)
+    frame->checksum = (uint16_t)((buffer[318] << 8) | buffer[319]);
 
-    uint16_t computed = frame_compute_checksum_bytes(buffer, total_needed - FRAME_CHECKSUM_LEN);
+    // Compute checksum over first 318 bytes (excludes checksum itself)
+    uint16_t computed = frame_compute_checksum_bytes(buffer, 318);
     if (frame->checksum != computed) {
         // Debug: Log checksum mismatch
         write_str(STDERR_FILENO, "DEBUG Checksum: received=0x");
@@ -157,19 +159,16 @@ FrameParseResult frame_deserialize(const uint8_t* buffer, size_t length, Citadel
         write_str(STDERR_FILENO, " computed=0x");
         ulong_to_str(computed, hex_buf);
         write_str(STDERR_FILENO, hex_buf);
-        write_str(STDERR_FILENO, " bytes_checked=");
-        ulong_to_str(total_needed - FRAME_CHECKSUM_LEN, hex_buf);
-        write_str(STDERR_FILENO, hex_buf);
         write_str(STDERR_FILENO, "\n");
 
         if (consumed_bytes != NULL) {
-            *consumed_bytes = total_needed;
+            *consumed_bytes = FRAME_MAX_SIZE;
         }
         return FRAME_PARSE_BAD_CHECKSUM;
     }
 
     if (consumed_bytes != NULL) {
-        *consumed_bytes = total_needed;
+        *consumed_bytes = FRAME_MAX_SIZE;
     }
     return FRAME_PARSE_OK;
 }
