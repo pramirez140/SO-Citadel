@@ -1,6 +1,0 @@
-TRADE ORDER
-From: Dragonstone
-To: tully
-
-Items:
-Riverlord Spear - 5 units
