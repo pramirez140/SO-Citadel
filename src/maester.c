@@ -556,6 +556,15 @@ static void maester_receive_placeholder(Maester* maester, ConnectionEntry* entry
     uint8_t buffer[FRAME_MAX_SIZE];
     ssize_t bytes = read(entry->sockfd, buffer, sizeof(buffer));
     if (bytes > 0) {
+        // Log received bytes
+        write_str(STDOUT_FILENO, "DEBUG: Received ");
+        char bytes_buf[32];
+        long_to_str(bytes, bytes_buf);
+        write_str(STDOUT_FILENO, bytes_buf);
+        write_str(STDOUT_FILENO, " bytes from peer ");
+        write_str(STDOUT_FILENO, entry->peer_ip);
+        write_str(STDOUT_FILENO, "\n");
+
         if (frame_buffer_append(&entry->recv_buffer, buffer, (size_t)bytes) != 0) {
             write_str(STDERR_FILENO, "Warning: receive buffer overflow, dropping data.\n");
             frame_buffer_reset(&entry->recv_buffer);
@@ -564,15 +573,29 @@ static void maester_receive_placeholder(Maester* maester, ConnectionEntry* entry
         CitadelFrame frame;
         size_t consumed = 0;
         FrameParseResult result;
+        int frame_count = 0;
         while ((result = frame_buffer_extract(&entry->recv_buffer, &frame, &consumed)) == FRAME_PARSE_OK) {
+            frame_count++;
             maester_process_incoming_frame(maester, entry, &frame);
         }
-        if (result == FRAME_PARSE_BAD_CHECKSUM) {
+
+        // Log parse results
+        if (frame_count > 0) {
+            write_str(STDOUT_FILENO, "DEBUG: Successfully parsed ");
+            char count_buf[16];
+            int_to_str(frame_count, count_buf);
+            write_str(STDOUT_FILENO, count_buf);
+            write_str(STDOUT_FILENO, " frame(s)\n");
+        } else if (result == FRAME_PARSE_NEED_MORE) {
+            write_str(STDOUT_FILENO, "DEBUG: Need more data for complete frame\n");
+        } else if (result == FRAME_PARSE_BAD_CHECKSUM) {
             write_str(STDERR_FILENO, "Warning: Received frame with invalid checksum.\n");
+        } else if (result == FRAME_PARSE_INVALID) {
+            write_str(STDERR_FILENO, "Warning: Invalid frame format.\n");
         }
     } else if (bytes == 0) {
         write_str(STDOUT_FILENO, "Peer closed connection: ");
-        write_str(STDOUT_FILENO, entry->peer_realm);
+        write_str(STDOUT_FILENO, entry->peer_realm[0] ? entry->peer_realm : entry->peer_ip);
         write_str(STDOUT_FILENO, "\n");
         maester_close_connection_entry(entry);
     } else {

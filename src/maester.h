@@ -27,9 +27,9 @@ extern volatile sig_atomic_t g_should_exit;
 #define PATH_MAX_LEN          256
 #define ROUTE_DEFAULT         "DEFAULT"
 
-#define FRAME_ORIGIN_LEN      20
-#define FRAME_DEST_LEN        20
-#define FRAME_MAX_DATA        320
+#define FRAME_ORIGIN_LEN      32
+#define FRAME_DEST_LEN        32
+#define FRAME_MAX_DATA        251
 #define FRAME_HEADER_LEN      (1 + FRAME_ORIGIN_LEN + FRAME_DEST_LEN + 2)
 #define FRAME_CHECKSUM_LEN    2
 #define FRAME_MAX_SIZE        (FRAME_HEADER_LEN + FRAME_MAX_DATA + FRAME_CHECKSUM_LEN)

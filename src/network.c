@@ -149,6 +149,19 @@ FrameParseResult frame_deserialize(const uint8_t* buffer, size_t length, Citadel
 
     uint16_t computed = frame_compute_checksum_bytes(buffer, total_needed - FRAME_CHECKSUM_LEN);
     if (frame->checksum != computed) {
+        // Debug: Log checksum mismatch
+        write_str(STDERR_FILENO, "DEBUG Checksum: received=0x");
+        char hex_buf[16];
+        ulong_to_str(frame->checksum, hex_buf);
+        write_str(STDERR_FILENO, hex_buf);
+        write_str(STDERR_FILENO, " computed=0x");
+        ulong_to_str(computed, hex_buf);
+        write_str(STDERR_FILENO, hex_buf);
+        write_str(STDERR_FILENO, " bytes_checked=");
+        ulong_to_str(total_needed - FRAME_CHECKSUM_LEN, hex_buf);
+        write_str(STDERR_FILENO, hex_buf);
+        write_str(STDERR_FILENO, "\n");
+
         if (consumed_bytes != NULL) {
             *consumed_bytes = total_needed;
         }
