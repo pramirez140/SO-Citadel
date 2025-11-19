@@ -826,8 +826,40 @@ static void maester_accept_placeholder(Maester* maester) {
             break;
         }
 
-        write_str(STDOUT_FILENO, "\nIncoming connection received (Phase 2 networking placeholder).\n");
-        close(client_fd);
+        // Add connection to pool
+        ConnectionEntry* entry = maester_add_connection_entry(maester);
+        if (entry == NULL) {
+            write_str(STDERR_FILENO, "\nWarning: Connection pool full, rejecting incoming connection.\n");
+            close(client_fd);
+            continue;
+        }
+
+        // Set socket to non-blocking
+        if (set_socket_nonblocking(client_fd) < 0) {
+            write_str(STDERR_FILENO, "Warning: Failed to set non-blocking mode on accepted socket.\n");
+        }
+
+        // Initialize connection entry
+        entry->sockfd = client_fd;
+        entry->addr = addr;
+        entry->last_used = time(NULL);
+
+        // Extract peer IP and port from addr structure
+        char peer_ip[IP_ADDR_MAX];
+        inet_ntop(AF_INET, &addr.sin_addr, peer_ip, sizeof(peer_ip));
+        int peer_port = ntohs(addr.sin_port);
+        my_strcpy(entry->peer_ip, peer_ip);
+        entry->peer_port = peer_port;
+        entry->peer_realm[0] = '\0';  // Unknown realm until we receive a frame
+
+        // Log the connection
+        write_str(STDOUT_FILENO, "\nAccepted connection from ");
+        write_str(STDOUT_FILENO, peer_ip);
+        write_str(STDOUT_FILENO, ":");
+        char port_buf[16];
+        int_to_str(peer_port, port_buf);
+        write_str(STDOUT_FILENO, port_buf);
+        write_str(STDOUT_FILENO, "\n");
     }
 }
 
