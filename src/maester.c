@@ -609,6 +609,56 @@ static void maester_process_incoming_frame(Maester* maester, ConnectionEntry* en
     if (maester == NULL || frame == NULL) {
         return;
     }
+
+    // Check if this frame is for us or needs forwarding
+    if (my_strcasecmp(frame->destination, maester->realm_name) != 0) {
+        // Frame is NOT for us - forward it to the next hop
+        write_str(STDOUT_FILENO, "Forwarding frame from ");
+        write_str(STDOUT_FILENO, frame->origin);
+        write_str(STDOUT_FILENO, " to ");
+        write_str(STDOUT_FILENO, frame->destination);
+        write_str(STDOUT_FILENO, " via next hop...\n");
+
+        // Resolve route to destination
+        int used_default = 0;
+        Route* route = maester_resolve_route(maester, frame->destination, &used_default);
+
+        if (route == NULL) {
+            // No route found - send ERROR_UNKNOWN back to origin
+            write_str(STDERR_FILENO, "No route to ");
+            write_str(STDERR_FILENO, frame->destination);
+            write_str(STDERR_FILENO, ", sending ERROR_UNKNOWN to origin.\n");
+
+            CitadelFrame error_frame;
+            frame_init(&error_frame, FRAME_TYPE_ERROR_UNKNOWN, maester->realm_name, frame->origin);
+            const char* error_msg = "No route to destination";
+            int msg_len = my_strlen(error_msg);
+            if (msg_len > FRAME_MAX_DATA) msg_len = FRAME_MAX_DATA;
+            memcpy(error_frame.data, error_msg, msg_len);
+            error_frame.data_length = msg_len;
+
+            // Send error back through the connection we received from
+            maester_send_frame(entry, &error_frame);
+            return;
+        }
+
+        // Get or open connection to next hop
+        ConnectionEntry* next_hop = maester_get_or_open_connection(maester, route->realm, route->ip, route->port);
+        if (next_hop == NULL) {
+            write_str(STDERR_FILENO, "Failed to connect to next hop. Dropping frame.\n");
+            return;
+        }
+
+        // Forward the frame
+        if (maester_send_frame(next_hop, frame) == 0) {
+            write_str(STDOUT_FILENO, "Frame forwarded successfully.\n");
+        } else {
+            write_str(STDERR_FILENO, "Failed to forward frame.\n");
+        }
+        return;
+    }
+
+    // Frame IS for us - process it locally
     if (frame->type == FRAME_TYPE_PLEDGE_RESPONSE &&
         maester_mission_is_active(maester) &&
         maester->active_mission.type == FRAME_TYPE_PLEDGE) {
