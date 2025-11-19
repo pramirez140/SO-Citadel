@@ -817,6 +817,39 @@ static void maester_process_incoming_frame(Maester* maester, ConnectionEntry* en
             write_str(STDERR_FILENO, "Warning: Could not record alliance request.\n");
         }
     }
+
+    // Handle operations that require an active alliance
+    // LIST_REQUEST (0x11) and ORDER frames (0x14, 0x15) require alliance
+    if (frame->type == FRAME_TYPE_LIST_REQUEST ||
+        frame->type == FRAME_TYPE_ORDER_HEADER ||
+        frame->type == FRAME_TYPE_ORDER_DATA) {
+
+        // Check if sender is actively allied with us
+        if (!maester_is_allied(maester, frame->origin)) {
+            write_str(STDERR_FILENO, "Unauthorized request from ");
+            write_str(STDERR_FILENO, frame->origin);
+            write_str(STDERR_FILENO, " (not allied). Sending ERROR_UNAUTHORIZED.\n");
+
+            // Send ERROR_UNAUTHORIZED response
+            CitadelFrame error_frame;
+            frame_init(&error_frame, FRAME_TYPE_ERROR_UNAUTHORIZED, maester->realm_name, frame->origin);
+            const char* error_msg = "Operation requires active alliance";
+            int msg_len = my_strlen(error_msg);
+            if (msg_len > FRAME_MAX_DATA) msg_len = FRAME_MAX_DATA;
+            memcpy(error_frame.data, error_msg, msg_len);
+            error_frame.data_length = msg_len;
+
+            maester_send_frame(entry, &error_frame);
+            return;
+        }
+
+        // If allied, handle the request
+        // (Full implementation of LIST_REQUEST and ORDER handling is Phase 3)
+        write_str(STDOUT_FILENO, "Authorized request from allied realm ");
+        write_str(STDOUT_FILENO, frame->origin);
+        write_str(STDOUT_FILENO, " - processing...\n");
+        // TODO: Implement actual handling in Phase 3
+    }
 }
 
 // ========== Signal handler for CTRL+C ==========
