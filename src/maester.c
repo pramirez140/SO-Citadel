@@ -354,9 +354,20 @@ static int maester_prepare_sigil_metadata(Maester* maester, const char* sigil, c
         return -1;
     }
 
-    struct stat st;
-    if (stat(full_path, &st) < 0 || !S_ISREG(st.st_mode)) {
+    // Check if file exists and get its size using open()+lseek() instead of forbidden stat()
+    int fd = open(full_path, O_RDONLY);
+    if (fd < 0) {
         write_str(STDOUT_FILENO, "Error: Sigil file not found: ");
+        write_str(STDOUT_FILENO, full_path);
+        write_str(STDOUT_FILENO, "\n");
+        return -1;
+    }
+
+    off_t file_size = lseek(fd, 0, SEEK_END);
+    close(fd);
+
+    if (file_size < 0) {
+        write_str(STDOUT_FILENO, "Error: Could not determine file size: ");
         write_str(STDOUT_FILENO, full_path);
         write_str(STDOUT_FILENO, "\n");
         return -1;
@@ -379,7 +390,7 @@ static int maester_prepare_sigil_metadata(Maester* maester, const char* sigil, c
     my_strcpy(sigil_name, base_name);
 
     char size_buffer[32];
-    ulong_to_str((unsigned long long)st.st_size, size_buffer);
+    ulong_to_str((unsigned long long)file_size, size_buffer);
     size_t size_buffer_len = my_strlen(size_buffer);
     if (size_buffer_len + 1 > size_len) {
         write_str(STDOUT_FILENO, "Error: Could not convert file size.\n");
@@ -1075,6 +1086,9 @@ int maester_run(const char* config_file, const char* stock_file) {
     }
 
     maester_event_loop(maester);
+
+    // Gracefully notify all peers before closing connections
+    maester_broadcast_disconnect(maester);
     maester_close_all_connections(maester);
 
     write_str(STDOUT_FILENO, "\nCleaning up resources...\n");

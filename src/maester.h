@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
+#include <sys/stat.h>   // Needed for mkdir() only (stat() function is forbidden and not used)
 #include <sys/types.h>
 #include <time.h>
 

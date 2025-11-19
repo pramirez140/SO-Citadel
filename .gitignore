@@ -16,3 +16,9 @@ S2.c
 
 # Local documentation
 local-documentation/
+
+# Testing files and reports
+testing/
+*.log
+*output.log
+*_test.log

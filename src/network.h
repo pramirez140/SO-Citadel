@@ -24,6 +24,7 @@ void   maester_log_route_resolution(const char* destination, const Route* route,
 ConnectionEntry* maester_add_connection_entry(Maester* maester);
 ConnectionEntry* maester_get_or_open_connection(Maester* maester, const char* realm, const char* ip, int port);
 void             maester_compact_connections(Maester* maester);
+void             maester_broadcast_disconnect(Maester* maester);
 void             maester_close_all_connections(Maester* maester);
 void             maester_close_connection_entry(ConnectionEntry* entry);
 int              maester_send_frame(ConnectionEntry* entry, const CitadelFrame* frame);

@@ -478,6 +478,51 @@ void maester_compact_connections(Maester* maester) {
     maester->num_connections = write_idx;
 }
 
+void maester_broadcast_disconnect(Maester* maester) {
+    if (maester == NULL) {
+        return;
+    }
+
+    write_str(STDOUT_FILENO, "\nBroadcasting DISCONNECT frames to all peers...\n");
+
+    if (maester->connections == NULL || maester->num_connections == 0) {
+        write_str(STDOUT_FILENO, "  No active connections to notify.\n");
+        return;
+    }
+
+    // Send DISCONNECT frame to all active connections
+    for (int i = 0; i < maester->num_connections; i++) {
+        ConnectionEntry* entry = &maester->connections[i];
+        if (entry->sockfd < 0) {
+            continue;  // Skip closed connections
+        }
+
+        // Determine destination (use peer realm if known, otherwise peer IP)
+        const char* destination = (entry->peer_realm[0] != '\0') ? entry->peer_realm : entry->peer_ip;
+
+        // Create DISCONNECT frame
+        CitadelFrame disconnect_frame;
+        frame_init(&disconnect_frame, FRAME_TYPE_DISCONNECT, maester->realm_name, destination);
+        disconnect_frame.data_length = 0;  // DISCONNECT frames have no payload
+
+        // Send the frame
+        if (maester_send_frame(entry, &disconnect_frame) == 0) {
+            write_str(STDOUT_FILENO, "  Sent DISCONNECT to ");
+            write_str(STDOUT_FILENO, destination);
+            write_str(STDOUT_FILENO, "\n");
+
+            // Flush send buffer to ensure delivery
+            maester_flush_send_buffer(entry);
+        } else {
+            write_str(STDERR_FILENO, "  Warning: Failed to send DISCONNECT to ");
+            write_str(STDERR_FILENO, destination);
+            write_str(STDERR_FILENO, "\n");
+        }
+    }
+
+    write_str(STDOUT_FILENO, "DISCONNECT broadcast complete.\n");
+}
+
 void maester_close_all_connections(Maester* maester) {
     if (maester == NULL || maester->connections == NULL) return;
     for (int i = 0; i < maester->num_connections; i++) {
