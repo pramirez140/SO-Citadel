@@ -1,4 +1,10 @@
 The Citadel System
+
+=== PORT ALLOCATION ===
+Ramírez Lázaro, Pablo (AD) (IA)    8685-8689 ICEDD
+Rodriguez Carmona, Santiago (IA)    8690-8694 ICEDD
+=======================
+
 King Viserys is dead. The golden thread that once bound the realm has broken, and the trust among the Great Houses has evaporated. In this climate of tension, traditional trade routes are no longer safe, and alliances unravel as quickly as they are forged. Ravens fly toward castles bearing banners of dragons, green and black, but they do not carry messages of war, only an urgent need: to survive the coming political winter.
 
 In this chaos, the Archmaesters of the Citadel have issued you a commission. Not to build a system of war, but a new network of trust and trade capable of operating in a fractured realm with no central power. You must design The Citadel System, a decentralized network that allows the Great Houses to forge alliances and then establish secure trade routes.
