@@ -301,10 +301,25 @@ void free_maester(Maester* maester) {
 
 static int build_origin_string(const Maester* maester, char* buffer, size_t len) {
     if (maester == NULL || buffer == NULL || len == 0) return -1;
-    int written = snprintf(buffer, len, "%s:%d", maester->ip, maester->port);
-    if (written < 0 || (size_t)written >= len || (size_t)written > FRAME_ORIGIN_LEN) {
+
+    // Build "IP:PORT" string manually without snprintf
+    int ip_len = my_strlen(maester->ip);
+    char port_str[16];
+    int_to_str(maester->port, port_str);
+    int port_len = my_strlen(port_str);
+
+    // Check total length fits
+    if ((size_t)(ip_len + 1 + port_len + 1) > len || (size_t)(ip_len + 1 + port_len) > FRAME_ORIGIN_LEN) {
         return -1;
     }
+
+    // Copy IP
+    my_strcpy(buffer, maester->ip);
+    // Add colon
+    buffer[ip_len] = ':';
+    // Copy port
+    my_strcpy(buffer + ip_len + 1, port_str);
+
     return 0;
 }
 
@@ -476,13 +491,47 @@ void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {
 
     CitadelFrame frame;
     frame_init(&frame, FRAME_TYPE_PLEDGE, origin, realm);
-    int payload_len = snprintf((char*)frame.data, FRAME_MAX_DATA, "%s&%s&%s&%s",
-                               maester->realm_name, sigil_name, file_size_str, md5_hex);
-    if (payload_len < 0 || payload_len >= FRAME_MAX_DATA) {
+
+    // Build "realm&sigil&size&md5" payload manually without snprintf
+    int offset = 0;
+    int len;
+
+    len = my_strlen(maester->realm_name);
+    if (offset + len >= FRAME_MAX_DATA) {
         write_str(STDOUT_FILENO, "Error: Pledge data too large.\n");
         return;
     }
-    frame.data_length = (uint16_t)payload_len;
+    memcpy(frame.data + offset, maester->realm_name, len);
+    offset += len;
+    frame.data[offset++] = '&';
+
+    len = my_strlen(sigil_name);
+    if (offset + len >= FRAME_MAX_DATA) {
+        write_str(STDOUT_FILENO, "Error: Pledge data too large.\n");
+        return;
+    }
+    memcpy(frame.data + offset, sigil_name, len);
+    offset += len;
+    frame.data[offset++] = '&';
+
+    len = my_strlen(file_size_str);
+    if (offset + len >= FRAME_MAX_DATA) {
+        write_str(STDOUT_FILENO, "Error: Pledge data too large.\n");
+        return;
+    }
+    memcpy(frame.data + offset, file_size_str, len);
+    offset += len;
+    frame.data[offset++] = '&';
+
+    len = my_strlen(md5_hex);
+    if (offset + len >= FRAME_MAX_DATA) {
+        write_str(STDOUT_FILENO, "Error: Pledge data too large.\n");
+        return;
+    }
+    memcpy(frame.data + offset, md5_hex, len);
+    offset += len;
+
+    frame.data_length = (uint16_t)offset;
 
     int used_default = 0;
     Route* route = maester_resolve_route(maester, realm, &used_default);
@@ -786,11 +835,31 @@ static void maester_process_incoming_frame(Maester* maester, ConnectionEntry* en
         int copy_len = (data_len < (int)sizeof(response) - 1) ? data_len : (int)sizeof(response) - 1;
         memcpy(response, frame->data, copy_len);
         response[copy_len] = '\0';
-        int written = snprintf(message, sizeof(message), "Alliance response from %s: %s",
-                               frame->origin, response);
-        if (written < 0 || written >= (int)sizeof(message)) {
-            message[sizeof(message) - 1] = '\0';
+
+        // Build "Alliance response from <origin>: <response>" manually without snprintf
+        int msg_offset = 0;
+        const char* prefix = "Alliance response from ";
+        int prefix_len = my_strlen(prefix);
+        const char* separator = ": ";
+        int sep_len = my_strlen(separator);
+        int origin_len = my_strlen(frame->origin);
+        int response_len = my_strlen(response);
+
+        if (prefix_len + origin_len + sep_len + response_len + 1 > (int)sizeof(message)) {
+            // Truncate if too long
+            my_strcpy(message, "Alliance response (too long)");
+        } else {
+            memcpy(message + msg_offset, prefix, prefix_len);
+            msg_offset += prefix_len;
+            memcpy(message + msg_offset, frame->origin, origin_len);
+            msg_offset += origin_len;
+            memcpy(message + msg_offset, separator, sep_len);
+            msg_offset += sep_len;
+            memcpy(message + msg_offset, response, response_len);
+            msg_offset += response_len;
+            message[msg_offset] = '\0';
         }
+
         maester_mission_finish(maester, message);
     }
 
