@@ -607,34 +607,36 @@ void cmd_pledge_respond(Maester* maester, const char* realm, const char* respons
 void cmd_pledge_status(Maester* maester) {
     if (maester == NULL) return;
 
-    maester_mission_check_timeouts(maester);
-    if (!maester_mission_is_active(maester)) {
-        write_str(STDOUT_FILENO, "No active missions.\n");
+    write_str(STDOUT_FILENO, "Alliance Status:\n");
+
+    if (maester->alliances == NULL || maester->num_alliances == 0) {
+        write_str(STDOUT_FILENO, "  No alliances recorded.\n");
         return;
     }
 
-    write_str(STDOUT_FILENO, "Mission in progress: ");
-    if (maester->active_mission.description[0] != '\0') {
-        write_str(STDOUT_FILENO, maester->active_mission.description);
-    } else {
-        write_str(STDOUT_FILENO, frame_type_to_string(maester->active_mission.type));
-    }
-    if (maester->active_mission.target_realm[0] != '\0') {
-        write_str(STDOUT_FILENO, " (target: ");
-        write_str(STDOUT_FILENO, maester->active_mission.target_realm);
-        write_str(STDOUT_FILENO, ")");
-    }
-    write_str(STDOUT_FILENO, ".\n");
+    // Display all alliances with their status
+    for (int i = 0; i < maester->num_alliances; i++) {
+        AllianceEntry* entry = &maester->alliances[i];
 
-    if (maester->active_mission.deadline > 0) {
-        time_t now = time(NULL);
-        long remaining = (long)(maester->active_mission.deadline - now);
-        if (remaining < 0) remaining = 0;
-        write_str(STDOUT_FILENO, "Time remaining: ");
-        char buf[16];
-        int_to_str((int)remaining, buf);
-        write_str(STDOUT_FILENO, buf);
-        write_str(STDOUT_FILENO, " seconds.\n");
+        write_str(STDOUT_FILENO, "  - ");
+        write_str(STDOUT_FILENO, entry->realm);
+        write_str(STDOUT_FILENO, ": ");
+        write_str(STDOUT_FILENO, alliance_state_to_string(entry->state));
+
+        // Show IP and port if available
+        if (entry->ip[0] != '\0') {
+            write_str(STDOUT_FILENO, " (");
+            write_str(STDOUT_FILENO, entry->ip);
+            if (entry->port > 0) {
+                write_str(STDOUT_FILENO, ":");
+                char port_buf[16];
+                int_to_str(entry->port, port_buf);
+                write_str(STDOUT_FILENO, port_buf);
+            }
+            write_str(STDOUT_FILENO, ")");
+        }
+
+        write_str(STDOUT_FILENO, "\n");
     }
 }
 
