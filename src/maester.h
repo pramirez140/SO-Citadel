@@ -1,19 +1,26 @@
 #ifndef MAESTER_H
 #define MAESTER_H
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
 
 #include "stock.h"
 #include "helper.h"
+
+// Global variable declared in main.c (signal handling)
+extern volatile sig_atomic_t g_should_exit;
 
 #define REALM_NAME_MAX        64
 #define IP_ADDR_MAX           46

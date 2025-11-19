@@ -1,12 +1,4 @@
 #include "network.h"
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <time.h>
 
 static void frame_copy_field_padded(const char* src, uint8_t* dst, size_t field_len);
 static void frame_extract_field(const uint8_t* src, size_t field_len, char* dst, size_t dst_len);

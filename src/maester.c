@@ -2,15 +2,6 @@
 #include "trade.h"
 #include "network.h"
 #include "missions.h"
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #define MAX_LINE_LENGTH 256
 
@@ -636,8 +627,8 @@ static void maester_process_incoming_frame(Maester* maester, ConnectionEntry* en
     }
 }
 
-// ========== Module-local state for CTRL+C ==========
-static volatile sig_atomic_t g_should_exit = 0;
+// ========== Signal handler for CTRL+C ==========
+// Note: g_should_exit is declared in main.c as required by coding standards
 
 static void maester_handle_sigint(int sig) {
     (void)sig;
