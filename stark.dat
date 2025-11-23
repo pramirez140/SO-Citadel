@@ -1,0 +1,12 @@
+Stark
+./stark_dragonmont
+5
+127.0.0.1
+8687
+--- ROUTES ---
+DEFAULT 127.0.0.1 8685
+Targaryen 127.0.0.1 8685
+Arryn 127.0.0.1 8689
+Tully 127.0.0.1 8692
+Dustin 127.0.0.1 8686
+Greyjoy *.*.*.* 0

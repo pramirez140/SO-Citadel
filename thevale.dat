@@ -1,0 +1,9 @@
+TheVale
+./vale_dragonmont
+3
+127.0.0.1
+8687
+--- ROUTES ---
+DEFAULT 127.0.0.1 8685
+Dragonstone 127.0.0.1 8685
+KingsLanding 127.0.0.1 8686

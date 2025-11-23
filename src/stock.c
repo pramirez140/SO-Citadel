@@ -74,6 +74,45 @@ void free_stock(Product* stock) {
     }
 }
 
+int save_stock(const char* filename, Product* stock, int num_products) {
+    char path[512];
+    int has_slash = 0;
+    for (int i = 0; filename[i] != '\0'; i++) {
+        if (filename[i] == '/') {
+            has_slash = 1;
+            break;
+        }
+    }
+
+    if (has_slash) {
+        my_strcpy(path, filename);
+    } else {
+        my_strcpy(path, "data/");
+        str_append(path, filename);
+    }
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        write_str(STDERR_FILENO, "Error: Cannot open stock database file for writing ");
+        write_str(STDERR_FILENO, filename);
+        write_str(STDERR_FILENO, "\n");
+        return -1;
+    }
+
+    // Write all products to file in binary format
+    long bytes_to_write = num_products * sizeof(Product);
+    long bytes_written = write(fd, stock, bytes_to_write);
+
+    if (bytes_written != bytes_to_write) {
+        write_str(STDERR_FILENO, "Error: Failed to write stock database\n");
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
+
 void print_products(int numProducts, Product *products) {
     if (numProducts == 0 || products == NULL) {
         write_str(STDOUT_FILENO, "No products in stock.\n");

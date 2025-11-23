@@ -36,8 +36,14 @@ Maester* create_maester(const char* realm_name, const char* folder_path, const c
     my_strcpy(maester->folder_path, folder_path);
     my_strcpy(maester->ip, ip);
     maester->port = port;
+
+    // Port range validation
+    // Pablo range: 8685-8689
+    // Yago range: 8690-8694
     if (maester->port < 8685 || maester->port > 8694) {
         write_str(STDERR_FILENO, "Warning: Port not in assigned range (8685-8694)\n");
+        write_str(STDERR_FILENO, "  Pablo ports: 8685-8689\n");
+        write_str(STDERR_FILENO, "  Yago ports: 8690-8694\n");
     }
     maester->socket_fd = -1; 
     maester->num_envoys = 0;
@@ -245,6 +251,7 @@ Maester* load_maester_config(const char* config_file, const char* stock_file) {
     if (stock != NULL) {
         maester->stock = stock;
         maester->num_products = num_products;
+        my_strcpy(maester->stock_file_path, stock_file);
     }
 
     return maester;
@@ -374,7 +381,7 @@ static int maester_prepare_sigil_metadata(Maester* maester, const char* sigil, c
         return -1;
     }
 
-    // Check if file exists and get its size using open()+lseek() instead of forbidden stat()
+    // Check if file exists and get its size using open()+lseek()
     int fd = open(full_path, O_RDONLY);
     if (fd < 0) {
         write_str(STDOUT_FILENO, "Error: Sigil file not found: ");
@@ -452,19 +459,31 @@ void cmd_list_realms(Maester* maester) {
 void cmd_list_products(Maester* maester, const char* realm) {
     if (maester == NULL) return;
 
+    // If no realm specified, show our own products
     if (realm == NULL || my_strlen(realm) == 0) {
         print_products(maester->num_products, maester->stock);
         return;
     }
 
+    // Check if another mission is active
     if (maester_mission_is_active(maester)) {
         maester_mission_print_busy(maester, "a product list request");
         return;
     }
 
-    write_str(STDOUT_FILENO, "ERROR: You must have an alliance with ");
+    // Check if we have an active alliance with this realm
+    AllianceState state = maester_get_alliance_state(maester, realm);
+    if (state != ALLIANCE_ACTIVE) {
+        write_str(STDOUT_FILENO, "ERROR: You must have an alliance with ");
+        write_str(STDOUT_FILENO, realm);
+        write_str(STDOUT_FILENO, " to trade.\n");
+        return;
+    }
+
+    // Phase 2: Just confirm alliance exists (no actual file transfer yet)
+    write_str(STDOUT_FILENO, "List products request to ");
     write_str(STDOUT_FILENO, realm);
-    write_str(STDOUT_FILENO, " to trade.\n");
+    write_str(STDOUT_FILENO, ": OK (Phase 3 will implement file transfer)\n");
 }
 
 void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {
@@ -556,6 +575,11 @@ void cmd_pledge(Maester* maester, const char* realm, const char* sigil) {
         return;
     }
 
+    // Track outgoing pledge as PENDING
+    if (maester_add_or_update_alliance(maester, realm, route->ip, route->port, ALLIANCE_PENDING) != 0) {
+        write_str(STDERR_FILENO, "Warning: Failed to track outgoing pledge in alliance table\n");
+    }
+
     char mission_desc[64];
     mission_desc[0] = '\0';
     safe_append(mission_desc, sizeof(mission_desc), "Pledge to ");
@@ -635,7 +659,15 @@ void cmd_pledge_respond(Maester* maester, const char* realm, const char* respons
 
     // Create and send ALLIANCE_RESPONSE frame
     CitadelFrame response_frame;
-    frame_init(&response_frame, FRAME_TYPE_PLEDGE_RESPONSE, maester->realm_name, realm);
+
+    // Build origin string with IP:Port format
+    char origin[FRAME_ORIGIN_LEN + 1];
+    if (build_origin_string(maester, origin, sizeof(origin)) != 0) {
+        write_str(STDERR_FILENO, "Error: Origin endpoint too long.\n");
+        return;
+    }
+
+    frame_init(&response_frame, FRAME_TYPE_PLEDGE_RESPONSE, origin, realm);
 
     const char* response_msg = is_accept ? "ACCEPT" : "REJECT";
     int msg_len = my_strlen(response_msg);
@@ -700,14 +732,14 @@ static void maester_receive_placeholder(Maester* maester, ConnectionEntry* entry
     uint8_t buffer[FRAME_MAX_SIZE];
     ssize_t bytes = read(entry->sockfd, buffer, sizeof(buffer));
     if (bytes > 0) {
-        // Log received bytes
-        write_str(STDOUT_FILENO, "DEBUG: Received ");
-        char bytes_buf[32];
-        long_to_str(bytes, bytes_buf);
-        write_str(STDOUT_FILENO, bytes_buf);
-        write_str(STDOUT_FILENO, " bytes from peer ");
-        write_str(STDOUT_FILENO, entry->peer_ip);
-        write_str(STDOUT_FILENO, "\n");
+        // Log received bytes (DEBUG)
+        // write_str(STDOUT_FILENO, "DEBUG: Received ");
+        // char bytes_buf[32];
+        // long_to_str(bytes, bytes_buf);
+        // write_str(STDOUT_FILENO, bytes_buf);
+        // write_str(STDOUT_FILENO, " bytes from peer ");
+        // write_str(STDOUT_FILENO, entry->peer_ip);
+        // write_str(STDOUT_FILENO, "\n");
 
         if (frame_buffer_append(&entry->recv_buffer, buffer, (size_t)bytes) != 0) {
             write_str(STDERR_FILENO, "Warning: receive buffer overflow, dropping data.\n");
@@ -717,23 +749,46 @@ static void maester_receive_placeholder(Maester* maester, ConnectionEntry* entry
         CitadelFrame frame;
         size_t consumed = 0;
         FrameParseResult result;
-        int frame_count = 0;
+        // int frame_count = 0;  // DEBUG
         while ((result = frame_buffer_extract(&entry->recv_buffer, &frame, &consumed)) == FRAME_PARSE_OK) {
-            frame_count++;
+            // frame_count++;  // DEBUG
             maester_process_incoming_frame(maester, entry, &frame);
         }
 
-        // Log parse results
-        if (frame_count > 0) {
-            write_str(STDOUT_FILENO, "DEBUG: Successfully parsed ");
-            char count_buf[16];
-            int_to_str(frame_count, count_buf);
-            write_str(STDOUT_FILENO, count_buf);
-            write_str(STDOUT_FILENO, " frame(s)\n");
-        } else if (result == FRAME_PARSE_NEED_MORE) {
-            write_str(STDOUT_FILENO, "DEBUG: Need more data for complete frame\n");
+        // Log parse results (DEBUG)
+        // if (frame_count > 0) {
+        //     write_str(STDOUT_FILENO, "DEBUG: Successfully parsed ");
+        //     char count_buf[16];
+        //     int_to_str(frame_count, count_buf);
+        //     write_str(STDOUT_FILENO, count_buf);
+        //     write_str(STDOUT_FILENO, " frame(s)\n");
+        // } else
+        if (result == FRAME_PARSE_NEED_MORE) {
+            // write_str(STDOUT_FILENO, "DEBUG: Need more data for complete frame\n");
         } else if (result == FRAME_PARSE_BAD_CHECKSUM) {
             write_str(STDERR_FILENO, "Warning: Received frame with invalid checksum.\n");
+
+            // Send NACK frame back to sender
+            CitadelFrame nack_frame;
+            frame_init(&nack_frame, FRAME_TYPE_NACK, maester->realm_name, frame.origin);
+
+            // Add error message in DATA field
+            const char* error_msg = "Checksum validation failed";
+            size_t msg_len = my_strlen(error_msg);
+            if (msg_len > FRAME_MAX_DATA) {
+                msg_len = FRAME_MAX_DATA;
+            }
+            memcpy(nack_frame.data, error_msg, msg_len);
+            nack_frame.data_length = (uint16_t)msg_len;
+
+            // Send NACK frame
+            if (maester_send_frame(entry, &nack_frame) == 0) {
+                write_str(STDOUT_FILENO, "Sent NACK to ");
+                write_str(STDOUT_FILENO, frame.origin);
+                write_str(STDOUT_FILENO, " due to checksum failure.\n");
+            } else {
+                write_str(STDERR_FILENO, "Warning: Failed to send NACK frame.\n");
+            }
         } else if (result == FRAME_PARSE_INVALID) {
             write_str(STDERR_FILENO, "Warning: Invalid frame format.\n");
         }
@@ -753,9 +808,24 @@ static void maester_receive_placeholder(Maester* maester, ConnectionEntry* entry
 static void maester_handle_connection_event(Maester* maester, ConnectionEntry* entry, short revents) {
     if (entry == NULL) return;
     if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
-        write_str(STDERR_FILENO, "Connection error with peer ");
-        write_str(STDERR_FILENO, entry->peer_realm);
-        write_str(STDERR_FILENO, ". Closing.\n");
+        // Check if this is a known allied realm
+        if (entry->peer_realm[0] != '\0') {
+            AllianceEntry* ally = maester_find_alliance(maester, entry->peer_realm);
+            if (ally != NULL && ally->state == ALLIANCE_ACTIVE) {
+                write_str(STDOUT_FILENO, "\n>>> Alliance partner ");
+                write_str(STDOUT_FILENO, entry->peer_realm);
+                write_str(STDOUT_FILENO, " has disconnected.\n");
+                write_str(STDOUT_FILENO, "$ ");
+            } else {
+                write_str(STDOUT_FILENO, "\n>>> Connection with ");
+                write_str(STDOUT_FILENO, entry->peer_realm);
+                write_str(STDOUT_FILENO, " closed.\n");
+                write_str(STDOUT_FILENO, "$ ");
+            }
+        } else {
+            write_str(STDOUT_FILENO, "\n>>> Connection closed.\n");
+            write_str(STDOUT_FILENO, "$ ");
+        }
         maester_close_connection_entry(entry);
         return;
     }
@@ -772,7 +842,7 @@ static void maester_handle_connection_event(Maester* maester, ConnectionEntry* e
 
 static void maester_process_incoming_frame(Maester* maester, ConnectionEntry* entry, const CitadelFrame* frame) {
     (void)entry;
-    frame_log_summary("Received frame", frame);
+    // frame_log_summary("Received frame", frame);  // DEBUG
     if (maester == NULL || frame == NULL) {
         return;
     }
@@ -829,38 +899,92 @@ static void maester_process_incoming_frame(Maester* maester, ConnectionEntry* en
     if (frame->type == FRAME_TYPE_PLEDGE_RESPONSE &&
         maester_mission_is_active(maester) &&
         maester->active_mission.type == FRAME_TYPE_PLEDGE) {
-        char message[128];
+
+        char realm_name[REALM_NAME_MAX];
+        if (maester->active_mission.target_realm[0] == '\0') {
+            write_str(STDERR_FILENO, "Warning: Received PLEDGE_RESPONSE but no active mission found.\n");
+            return;
+        }
+        my_strcpy(realm_name, maester->active_mission.target_realm);
+
         int data_len = (frame->data_length < FRAME_MAX_DATA) ? frame->data_length : FRAME_MAX_DATA;
         char response[64];
         int copy_len = (data_len < (int)sizeof(response) - 1) ? data_len : (int)sizeof(response) - 1;
         memcpy(response, frame->data, copy_len);
         response[copy_len] = '\0';
 
-        // Build "Alliance response from <origin>: <response>" manually without snprintf
-        int msg_offset = 0;
-        const char* prefix = "Alliance response from ";
-        int prefix_len = my_strlen(prefix);
-        const char* separator = ": ";
-        int sep_len = my_strlen(separator);
-        int origin_len = my_strlen(frame->origin);
-        int response_len = my_strlen(response);
+        // Validate and update alliance state based on response
+        int is_accept = (my_strcasecmp(response, "ACCEPT") == 0);
+        int is_reject = (my_strcasecmp(response, "REJECT") == 0);
 
-        if (prefix_len + origin_len + sep_len + response_len + 1 > (int)sizeof(message)) {
-            // Truncate if too long
-            my_strcpy(message, "Alliance response (too long)");
-        } else {
-            memcpy(message + msg_offset, prefix, prefix_len);
-            msg_offset += prefix_len;
-            memcpy(message + msg_offset, frame->origin, origin_len);
-            msg_offset += origin_len;
-            memcpy(message + msg_offset, separator, sep_len);
-            msg_offset += sep_len;
-            memcpy(message + msg_offset, response, response_len);
-            msg_offset += response_len;
-            message[msg_offset] = '\0';
+        if (!is_accept && !is_reject) {
+            write_str(STDERR_FILENO, "Warning: Invalid PLEDGE_RESPONSE from ");
+            write_str(STDERR_FILENO, realm_name);
+            write_str(STDERR_FILENO, " (expected ACCEPT or REJECT, got: ");
+            write_str(STDERR_FILENO, response);
+            write_str(STDERR_FILENO, ")\n");
+            maester_mission_finish(maester, "Invalid alliance response received");
+            return;
         }
 
-        maester_mission_finish(maester, message);
+        // Extract IP and port from frame->origin
+        char sender_ip[IP_ADDR_MAX];
+        int sender_port = 0;
+        sender_ip[0] = '\0';
+
+        int origin_idx = 0;
+        int ip_idx = 0;
+        const char* origin_str = frame->origin;
+
+        // Extract IP part
+        while (origin_str[origin_idx] != ':' && origin_str[origin_idx] != '\0' && ip_idx < IP_ADDR_MAX - 1) {
+            sender_ip[ip_idx++] = origin_str[origin_idx++];
+        }
+        sender_ip[ip_idx] = '\0';
+
+        // Extract port if present
+        if (origin_str[origin_idx] == ':') {
+            origin_idx++; // skip ':'
+            char port_str[16];
+            int port_idx = 0;
+            while (origin_str[origin_idx] != '\0' && port_idx < 15) {
+                port_str[port_idx++] = origin_str[origin_idx++];
+            }
+            port_str[port_idx] = '\0';
+            sender_port = str_to_int(port_str);
+        }
+
+        // Update alliance state with IP:Port information
+        AllianceState new_state = is_accept ? ALLIANCE_ACTIVE : ALLIANCE_INACTIVE;
+
+        if (maester_add_or_update_alliance(maester, realm_name, sender_ip, sender_port, new_state) != 0) {
+            write_str(STDERR_FILENO, "Error: Failed to update alliance state for ");
+            write_str(STDERR_FILENO, realm_name);
+            write_str(STDERR_FILENO, "\n");
+            maester_mission_finish(maester, "Failed to update alliance state");
+            return;
+        }
+
+        // Log the state change
+        write_str(STDOUT_FILENO, "\n>>> Alliance response from ");
+        write_str(STDOUT_FILENO, realm_name);
+        write_str(STDOUT_FILENO, ": ");
+        write_str(STDOUT_FILENO, response);
+        write_str(STDOUT_FILENO, "\n");
+
+        if (is_accept) {
+            write_str(STDOUT_FILENO, "Alliance with ");
+            write_str(STDOUT_FILENO, realm_name);
+            write_str(STDOUT_FILENO, " is now ACTIVE.\n\n");
+        } else {
+            write_str(STDOUT_FILENO, "Alliance with ");
+            write_str(STDOUT_FILENO, realm_name);
+            write_str(STDOUT_FILENO, " was REJECTED.\n\n");
+        }
+        write_str(STDOUT_FILENO, "$ ");
+
+        // Finish the mission
+        maester_mission_finish(maester, NULL);
     }
 
     // Handle incoming ALLIANCE_REQUEST (PLEDGE)
@@ -869,22 +993,102 @@ static void maester_process_incoming_frame(Maester* maester, ConnectionEntry* en
         write_str(STDOUT_FILENO, frame->origin);
         write_str(STDOUT_FILENO, "\n");
 
-        // Parse the payload: "sigil_name&file_size&md5_hex&timestamp"
-        // (We receive this but don't need to validate it - it's for information only)
+        // Parse the payload: "realm&sigil_name&file_size&md5_hex"
+        // Extract realm name from the first field of the payload
+        char realm_name[REALM_NAME_MAX];
+        realm_name[0] = '\0';
 
-        // Extract realm name from origin (format is "IP:Port")
-        // For now, we'll use the frame's origin field directly
-        // In Phase 3, we'll parse it to get the actual IP/port
+        int data_len = (frame->data_length < FRAME_MAX_DATA) ? frame->data_length : FRAME_MAX_DATA;
+        int i = 0;
+        int realm_idx = 0;
+
+        // Extract realm name up to the first '&' or end of data
+        while (i < data_len && frame->data[i] != '&' && realm_idx < REALM_NAME_MAX - 1) {
+            realm_name[realm_idx++] = frame->data[i++];
+        }
+        realm_name[realm_idx] = '\0';
+
+        // Clean the realm name to remove any '&' characters
+        clean_realm_name(realm_name);
+
+        if (realm_name[0] == '\0') {
+            write_str(STDERR_FILENO, "Warning: Could not extract realm name from PLEDGE payload.\n");
+            return;
+        }
+
+        // Extract IP and port from frame->origin (format is "IP:Port")
+        char sender_ip[IP_ADDR_MAX];
+        int sender_port = 0;
+        sender_ip[0] = '\0';
+
+        int origin_idx = 0;
+        int ip_idx = 0;
+        const char* origin_str = frame->origin;
+
+        // Extract IP part
+        while (origin_str[origin_idx] != ':' && origin_str[origin_idx] != '\0' && ip_idx < IP_ADDR_MAX - 1) {
+            sender_ip[ip_idx++] = origin_str[origin_idx++];
+        }
+        sender_ip[ip_idx] = '\0';
+
+        // Extract port if present
+        if (origin_str[origin_idx] == ':') {
+            origin_idx++; // skip ':'
+            char port_str[16];
+            int port_idx = 0;
+            while (origin_str[origin_idx] != '\0' && port_idx < 15) {
+                port_str[port_idx++] = origin_str[origin_idx++];
+            }
+            port_str[port_idx] = '\0';
+            sender_port = str_to_int(port_str);
+        }
 
         // Add or update alliance table entry as PENDING
-        if (maester_add_or_update_alliance(maester, frame->origin, NULL, 0, ALLIANCE_PENDING) == 0) {
-            write_str(STDOUT_FILENO, "Alliance request recorded as PENDING.\n");
+        if (maester_add_or_update_alliance(maester, realm_name, sender_ip, sender_port, ALLIANCE_PENDING) == 0) {
+            write_str(STDOUT_FILENO, "Alliance request from ");
+            write_str(STDOUT_FILENO, realm_name);
+            write_str(STDOUT_FILENO, " recorded as PENDING.\n");
             write_str(STDOUT_FILENO, "Use 'PLEDGE RESPOND ");
-            write_str(STDOUT_FILENO, frame->origin);
-            write_str(STDOUT_FILENO, " ACCEPT' to accept or 'REJECT' to decline.\n\n");
+            write_str(STDOUT_FILENO, realm_name);
+            write_str(STDOUT_FILENO, " ACCEPT' to accept or 'REJECT' to decline.\n");
+            write_str(STDOUT_FILENO, "$ ");
         } else {
             write_str(STDERR_FILENO, "Warning: Could not record alliance request.\n");
         }
+    }
+
+    // Handle DISCONNECT notification (0x27)
+    if (frame->type == FRAME_TYPE_DISCONNECT) {
+        // Determine the disconnecting realm name
+        char realm_name[REALM_NAME_MAX];
+        realm_name[0] = '\0';
+
+        // Try to get realm name from peer_realm in connection entry
+        if (entry->peer_realm[0] != '\0') {
+            my_strcpy(realm_name, entry->peer_realm);
+        } else {
+            // Try to find alliance by IP:Port from frame->origin
+            AllianceEntry* ally = maester_find_alliance(maester, frame->origin);
+            if (ally != NULL) {
+                my_strcpy(realm_name, ally->realm);
+            }
+        }
+
+        // Display disconnect message
+        write_str(STDOUT_FILENO, "\n>>> Alliance partner ");
+        if (realm_name[0] != '\0') {
+            write_str(STDOUT_FILENO, realm_name);
+        } else {
+            write_str(STDOUT_FILENO, frame->origin);
+        }
+        write_str(STDOUT_FILENO, " has disconnected.\n");
+        write_str(STDOUT_FILENO, "$ ");
+
+        // Mark alliance as inactive if found
+        if (realm_name[0] != '\0') {
+            maester_add_or_update_alliance(maester, realm_name, NULL, 0, ALLIANCE_INACTIVE);
+        }
+        return;
     }
 
     // Handle operations that require an active alliance
@@ -1032,6 +1236,9 @@ static void process_command(Maester* maester, char* input) {
 
     // EXIT
     if (token_count == 1 && my_strcasecmp(tokens[0], "EXIT") == 0) {
+        write_str(STDOUT_FILENO, "The Maester of ");
+        write_str(STDOUT_FILENO, maester->realm_name);
+        write_str(STDOUT_FILENO, " signs off. The ravens rest.\n");
         g_should_exit = 1;
         maester->shutting_down = 1;
         return;
@@ -1154,6 +1361,7 @@ static void maester_accept_placeholder(Maester* maester) {
         int_to_str(peer_port, port_buf);
         write_str(STDOUT_FILENO, port_buf);
         write_str(STDOUT_FILENO, "\n");
+        // Note: Event loop will handle prompt printing
     }
 }
 
@@ -1282,7 +1490,8 @@ static void maester_event_loop(Maester* maester) {
 // ============================================================================
 
 /**
- * Find an alliance entry by realm name.
+ * Find an alliance entry by realm name or IP:Port.
+ * If realm contains ':', treats it as IP:Port and matches against stored IP/port.
  * Returns pointer to entry if found, NULL otherwise.
  */
 static AllianceEntry* maester_find_alliance(Maester* maester, const char* realm) {
@@ -1290,9 +1499,53 @@ static AllianceEntry* maester_find_alliance(Maester* maester, const char* realm)
         return NULL;
     }
 
-    for (int i = 0; i < maester->num_alliances; i++) {
-        if (my_strcasecmp(maester->alliances[i].realm, realm) == 0) {
-            return &maester->alliances[i];
+    // Check if realm contains ':' (indicating IP:Port format)
+    int is_ip_port = 0;
+    for (int i = 0; realm[i] != '\0'; i++) {
+        if (realm[i] == ':') {
+            is_ip_port = 1;
+            break;
+        }
+    }
+
+    if (is_ip_port) {
+        // Parse IP:Port
+        char search_ip[IP_ADDR_MAX];
+        int search_port = 0;
+        int idx = 0;
+        int ip_idx = 0;
+
+        // Extract IP
+        while (realm[idx] != ':' && realm[idx] != '\0' && ip_idx < IP_ADDR_MAX - 1) {
+            search_ip[ip_idx++] = realm[idx++];
+        }
+        search_ip[ip_idx] = '\0';
+
+        // Extract port
+        if (realm[idx] == ':') {
+            idx++; // skip ':'
+            char port_str[16];
+            int port_idx = 0;
+            while (realm[idx] != '\0' && port_idx < 15) {
+                port_str[port_idx++] = realm[idx++];
+            }
+            port_str[port_idx] = '\0';
+            search_port = str_to_int(port_str);
+        }
+
+        // Search by IP:Port
+        for (int i = 0; i < maester->num_alliances; i++) {
+            if (my_strcasecmp(maester->alliances[i].ip, search_ip) == 0 &&
+                maester->alliances[i].port == search_port) {
+                return &maester->alliances[i];
+            }
+        }
+    } else {
+        // Search by realm name
+        for (int i = 0; i < maester->num_alliances; i++) {
+            if (my_strcasecmp(maester->alliances[i].realm, realm) == 0) {
+                return &maester->alliances[i];
+            }
         }
     }
 
@@ -1343,6 +1596,7 @@ static int maester_add_or_update_alliance(Maester* maester, const char* realm,
     // Initialize new entry
     AllianceEntry* new_entry = &maester->alliances[maester->num_alliances];
     my_strcpy(new_entry->realm, realm);
+    clean_realm_name(new_entry->realm);
     if (ip != NULL) {
         my_strcpy(new_entry->ip, ip);
     } else {
@@ -1414,6 +1668,16 @@ int maester_run(const char* config_file, const char* stock_file) {
     maester_close_all_connections(maester);
 
     write_str(STDOUT_FILENO, "\nCleaning up resources...\n");
+
+    // Save stock database before cleanup
+    if (maester->stock != NULL && maester->num_products > 0) {
+        if (save_stock(maester->stock_file_path, maester->stock, maester->num_products) == 0) {
+            write_str(STDOUT_FILENO, "Stock database saved successfully.\n");
+        } else {
+            write_str(STDERR_FILENO, "Warning: Failed to save stock database.\n");
+        }
+    }
+
     free_maester(maester);
     write_str(STDOUT_FILENO, "Maester process terminated. Farewell.\n");
     return 0;

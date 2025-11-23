@@ -13,6 +13,7 @@ typedef struct {
 
 // Stock database functions
 Product* load_stock(const char* filename, int* num_products);
+int      save_stock(const char* filename, Product* stock, int num_products);  // Saves stock data to binary file
 void     free_stock(Product* stock);
 void     print_products(int num_products, Product* products);
 

@@ -1,0 +1,11 @@
+Baratheon
+./baratheon_dragonmont
+4
+127.0.0.1
+8688
+--- ROUTES ---
+DEFAULT 127.0.0.1 8685
+Targaryen 127.0.0.1 8685
+Lannister 127.0.0.1 8686
+Cole 127.0.0.1 8694
+Peake *.*.*.* 0

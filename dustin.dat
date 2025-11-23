@@ -1,0 +1,10 @@
+Dustin
+./dustin_dragonmont
+3
+127.0.0.1
+8686
+--- ROUTES ---
+DEFAULT 127.0.0.1 8687
+Stark 127.0.0.1 8687
+Peake 127.0.0.1 8687
+Strong *.*.*.* 0

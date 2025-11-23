@@ -1,0 +1,10 @@
+Velaryon
+./velaryon_dragonmont
+3
+127.0.0.1
+8693
+--- ROUTES ---
+DEFAULT 127.0.0.1 8685
+Targaryen 127.0.0.1 8685
+Blackwood 127.0.0.1 8694
+Strong *.*.*.* 0

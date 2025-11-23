@@ -157,6 +157,7 @@ typedef struct Maester {
     int      num_routes;
     Product* stock;
     int      num_products;
+    char     stock_file_path[PATH_MAX_LEN];  // Path to stock database file
     AllianceEntry*   alliances;
     int              num_alliances;
     EnvoyMission*    envoy_missions;

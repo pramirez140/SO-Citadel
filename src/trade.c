@@ -98,7 +98,7 @@ void cmd_start_trade(struct Maester* maester, const char* realm) {
         }
 
         // cancel -> exit
-        if (my_strcasecmp(tokens[0], "cancel") == 0) {
+        if (my_strcasecmp(tokens[0], "cancel") == 0 || my_strcasecmp(tokens[0], "exit") == 0) {
             write_str(STDOUT_FILENO, "Trade cancelled.\n");
             break;
         }
@@ -199,6 +199,6 @@ void cmd_start_trade(struct Maester* maester, const char* realm) {
             continue;
         }
 
-        write_str(STDOUT_FILENO, "Unknown trade command. Try: add <product> <quantity>, remove <product> <quantity>, send, cancel\n");
+        write_str(STDOUT_FILENO, "Unknown trade command. Try: add <product> <quantity>, remove <product> <quantity>, send, cancel/exit\n");
     }
 }

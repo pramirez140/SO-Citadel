@@ -1,0 +1,10 @@
+Peake
+./peake_dragonmont
+3
+127.0.0.1
+8687
+--- ROUTES ---
+DEFAULT 127.0.0.1 8686
+Dustin 127.0.0.1 8686
+Strong 127.0.0.1 8688
+Baratheon *.*.*.* 0

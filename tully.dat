@@ -1,0 +1,12 @@
+Tully
+./tully_dragonmont
+5
+127.0.0.1
+8692
+--- ROUTES ---
+DEFAULT 127.0.0.1 8687
+Stark 127.0.0.1 8687
+Lannister 127.0.0.1 8686
+Arryn 127.0.0.1 8689
+Greyjoy 127.0.0.1 8691
+Blackwood *.*.*.* 0

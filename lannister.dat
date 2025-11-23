@@ -1,0 +1,13 @@
+Lannister
+./lannister_dragonmont
+6
+127.0.0.1
+8686
+--- ROUTES ---
+DEFAULT 127.0.0.1 8685
+Targaryen 127.0.0.1 8685
+Hightower 127.0.0.1 8690
+Tully 127.0.0.1 8692
+Baratheon 127.0.0.1 8688
+Blackwood *.*.*.* 0
+Strong *.*.*.* 0

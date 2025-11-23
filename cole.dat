@@ -1,0 +1,10 @@
+Cole
+./cole_dragonmont
+3
+127.0.0.1
+8685
+--- ROUTES ---
+DEFAULT 127.0.0.1 8688
+Baratheon 127.0.0.1 8688
+Strong 127.0.0.1 8688
+Arryn *.*.*.* 0

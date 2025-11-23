@@ -1,0 +1,10 @@
+Strong
+./strong_dragonmont
+3
+127.0.0.1
+8688
+--- ROUTES ---
+DEFAULT 127.0.0.1 8685
+Cole 127.0.0.1 8685
+Peake 127.0.0.1 8687
+Velaryon *.*.*.* 0

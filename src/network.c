@@ -500,9 +500,18 @@ void maester_broadcast_disconnect(Maester* maester) {
         // Determine destination (use peer realm if known, otherwise peer IP)
         const char* destination = (entry->peer_realm[0] != '\0') ? entry->peer_realm : entry->peer_ip;
 
+        // Build origin string with IP:Port format (per protocol spec)
+        char origin[FRAME_ORIGIN_LEN + 1];
+        int ip_len = my_strlen(maester->ip);
+        char port_str[16];
+        int_to_str(maester->port, port_str);
+        my_strcpy(origin, maester->ip);
+        origin[ip_len] = ':';
+        my_strcpy(origin + ip_len + 1, port_str);
+
         // Create DISCONNECT frame
         CitadelFrame disconnect_frame;
-        frame_init(&disconnect_frame, FRAME_TYPE_DISCONNECT, maester->realm_name, destination);
+        frame_init(&disconnect_frame, FRAME_TYPE_DISCONNECT, origin, destination);
         disconnect_frame.data_length = 0;  // DISCONNECT frames have no payload
 
         // Send the frame

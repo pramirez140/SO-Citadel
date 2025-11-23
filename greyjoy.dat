@@ -1,0 +1,10 @@
+Greyjoy
+./greyjoy_dragonmont
+3
+127.0.0.1
+8691
+--- ROUTES ---
+DEFAULT 127.0.0.1 8690
+Hightower 127.0.0.1 8690
+Tully 127.0.0.1 8692
+Stark *.*.*.* 0

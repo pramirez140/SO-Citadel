@@ -1,0 +1,11 @@
+Hightower
+./hightower_dragonmont
+4
+127.0.0.1
+8690
+--- ROUTES ---
+DEFAULT 127.0.0.1 8686
+Lannister 127.0.0.1 8686
+Greyjoy 127.0.0.1 8691
+Blackwood 127.0.0.1 8694
+Targaryen *.*.*.* 0

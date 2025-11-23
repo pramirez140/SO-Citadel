@@ -1,0 +1,14 @@
+Targaryen
+./targaryen_dragonmont
+7
+127.0.0.1
+8685
+--- ROUTES ---
+DEFAULT 127.0.0.1 8686
+Lannister 127.0.0.1 8686
+Stark 127.0.0.1 8687
+Baratheon 127.0.0.1 8688
+Velaryon 127.0.0.1 8693
+Arryn 127.0.0.1 8689
+Hightower *.*.*.* 0
+Greyjoy *.*.*.* 0

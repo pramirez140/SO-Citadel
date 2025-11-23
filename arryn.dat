@@ -1,0 +1,11 @@
+Arryn
+./arryn_dragonmont
+4
+127.0.0.1
+8689
+--- ROUTES ---
+DEFAULT 127.0.0.1 8687
+Stark 127.0.0.1 8687
+Targaryen 127.0.0.1 8685
+Tully 127.0.0.1 8692
+Cole *.*.*.* 0

@@ -1,0 +1,10 @@
+Blackwood
+./blackwood_dragonmont
+3
+127.0.0.1
+8694
+--- ROUTES ---
+DEFAULT 127.0.0.1 8690
+Hightower 127.0.0.1 8690
+Velaryon 127.0.0.1 8693
+Lannister *.*.*.* 0
