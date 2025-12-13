@@ -10,7 +10,6 @@ static int  maester_setup_listener(Maester* maester);
 static void maester_accept_placeholder(Maester* maester);
 static void maester_event_loop(Maester* maester);
 static int  build_origin_string(const Maester* maester, char* buffer, size_t len);
-static int  maester_join_path(const char* base, const char* relative, char* output, size_t output_len);
 static const char* maester_basename(const char* path);
 static int  maester_prepare_sigil_metadata(Maester* maester, const char* sigil, char* sigil_name,
                                            size_t sigil_name_len, char* file_size_str,
@@ -36,15 +35,6 @@ Maester* create_maester(const char* realm_name, const char* folder_path, const c
     my_strcpy(maester->folder_path, folder_path);
     my_strcpy(maester->ip, ip);
     maester->port = port;
-
-    // Port range validation
-    // Pablo range: 8685-8689
-    // Yago range: 8690-8694
-    if (maester->port < 8685 || maester->port > 8694) {
-        write_str(STDERR_FILENO, "Warning: Port not in assigned range (8685-8694)\n");
-        write_str(STDERR_FILENO, "  Pablo ports: 8685-8689\n");
-        write_str(STDERR_FILENO, "  Yago ports: 8690-8694\n");
-    }
     maester->socket_fd = -1; 
     maester->num_envoys = 0;
     maester->routes = NULL;
@@ -330,33 +320,6 @@ static int build_origin_string(const Maester* maester, char* buffer, size_t len)
     return 0;
 }
 
-static int maester_join_path(const char* base, const char* relative, char* output, size_t output_len) {
-    if (output == NULL || relative == NULL || output_len == 0) return -1;
-
-    if (relative[0] == '/' || relative[0] == '\\') {
-        size_t rel_len = my_strlen(relative);
-        if (rel_len + 1 > output_len) return -1;
-        my_strcpy(output, relative);
-        return 0;
-    }
-
-    if (base == NULL || base[0] == '\0') {
-        size_t rel_len = my_strlen(relative);
-        if (rel_len + 1 > output_len) return -1;
-        my_strcpy(output, relative);
-        return 0;
-    }
-
-    output[0] = '\0';
-    if (safe_append(output, output_len, base) != 0) return -1;
-    size_t base_len = my_strlen(output);
-    if (base_len > 0 && output[base_len - 1] != '/') {
-        if (safe_append(output, output_len, "/") != 0) return -1;
-    }
-    if (safe_append(output, output_len, relative) != 0) return -1;
-    return 0;
-}
-
 static const char* maester_basename(const char* path) {
     if (path == NULL) return "";
     const char* base = path;
@@ -371,21 +334,17 @@ static const char* maester_basename(const char* path) {
 static int maester_prepare_sigil_metadata(Maester* maester, const char* sigil, char* sigil_name,
                                           size_t sigil_name_len, char* file_size_str,
                                           size_t size_len, char md5_hex[33]) {
-    if (maester == NULL || sigil == NULL || sigil_name == NULL || file_size_str == NULL || md5_hex == NULL) {
+    (void)maester; // folder_path not used - sigil path is used as-is per statement
+    if (sigil == NULL || sigil_name == NULL || file_size_str == NULL || md5_hex == NULL) {
         return -1;
     }
 
-    char full_path[PATH_MAX_LEN * 2];
-    if (maester_join_path(maester->folder_path, sigil, full_path, sizeof(full_path)) != 0) {
-        write_str(STDOUT_FILENO, "Error: Sigil path too long.\n");
-        return -1;
-    }
-
+    // Use sigil path as-is (per statement: sigil is provided by user command)
     // Check if file exists and get its size using open()+lseek()
-    int fd = open(full_path, O_RDONLY);
+    int fd = open(sigil, O_RDONLY);
     if (fd < 0) {
         write_str(STDOUT_FILENO, "Error: Sigil file not found: ");
-        write_str(STDOUT_FILENO, full_path);
+        write_str(STDOUT_FILENO, sigil);
         write_str(STDOUT_FILENO, "\n");
         return -1;
     }
@@ -395,13 +354,13 @@ static int maester_prepare_sigil_metadata(Maester* maester, const char* sigil, c
 
     if (file_size < 0) {
         write_str(STDOUT_FILENO, "Error: Could not determine file size: ");
-        write_str(STDOUT_FILENO, full_path);
+        write_str(STDOUT_FILENO, sigil);
         write_str(STDOUT_FILENO, "\n");
         return -1;
     }
 
     uint8_t digest[16];
-    if (md5_compute_file(full_path, digest) != 0) {
+    if (md5_compute_file(sigil, digest) != 0) {
         write_str(STDOUT_FILENO, "Error: Could not compute MD5 of sigil file.\n");
         return -1;
     }
@@ -1387,7 +1346,11 @@ static void maester_event_loop(Maester* maester) {
         poll_capacity += maester->num_connections;
         if (poll_capacity < 2) poll_capacity = 2;
 
-        struct pollfd pollfds[poll_capacity];
+        struct pollfd *pollfds = (struct pollfd *)malloc(poll_capacity * sizeof(struct pollfd));
+        if (pollfds == NULL) {
+            write_str(STDERR_FILENO, "Error: Failed to allocate pollfds\n");
+            break;
+        }
         int poll_index = 0;
 
         pollfds[poll_index].fd = STDIN_FILENO;
@@ -1405,7 +1368,12 @@ static void maester_event_loop(Maester* maester) {
         }
 
         int conn_slots = (maester->num_connections > 0) ? maester->num_connections : 1;
-        ConnectionEntry* conn_map[conn_slots];
+        ConnectionEntry** conn_map = (ConnectionEntry**)malloc(conn_slots * sizeof(ConnectionEntry*));
+        if (conn_map == NULL) {
+            free(pollfds);
+            write_str(STDERR_FILENO, "Error: Failed to allocate conn_map\n");
+            break;
+        }
         int conn_start = poll_index;
         int conn_count = 0;
         for (int i = 0; i < maester->num_connections; i++) {
@@ -1427,12 +1395,18 @@ static void maester_event_loop(Maester* maester) {
         int poll_result = poll(pollfds, nfds, 500);
         if (poll_result < 0) {
             if (errno == EINTR) {
+                free(pollfds);
+                free(conn_map);
                 continue;
             }
             write_str(STDERR_FILENO, "Poll failed. Leaving event loop.\n");
+            free(pollfds);
+            free(conn_map);
             break;
         }
         if (poll_result == 0) {
+            free(pollfds);
+            free(conn_map);
             continue;
         }
 
@@ -1480,6 +1454,9 @@ static void maester_event_loop(Maester* maester) {
         }
 
         maester_compact_connections(maester);
+
+        free(pollfds);
+        free(conn_map);
     }
 
     maester->shutting_down = 1;

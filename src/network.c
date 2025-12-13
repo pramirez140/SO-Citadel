@@ -500,7 +500,7 @@ void maester_broadcast_disconnect(Maester* maester) {
         // Determine destination (use peer realm if known, otherwise peer IP)
         const char* destination = (entry->peer_realm[0] != '\0') ? entry->peer_realm : entry->peer_ip;
 
-        // Build origin string with IP:Port format (per protocol spec)
+        // Build origin string with IP:Port format
         char origin[FRAME_ORIGIN_LEN + 1];
         int ip_len = my_strlen(maester->ip);
         char port_str[16];

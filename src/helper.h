@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <fcntl.h>
+#include <sys/wait.h>
 
 // String utility functions
 int  my_strlen(const char *str);
@@ -26,16 +27,7 @@ void clean_realm_name(char *name);
 // Error handling
 void die(char *msg);
 
-// MD5 utilities
-typedef struct {
-    uint32_t state[4];
-    uint32_t count[2];
-    uint8_t  buffer[64];
-} MD5Context;
-
-void md5_init(MD5Context* ctx);
-void md5_update(MD5Context* ctx, const uint8_t* data, size_t len);
-void md5_final(uint8_t digest[16], MD5Context* ctx);
+// MD5 utilities (uses fork/exec to call md5sum command per statement requirement)
 int  md5_compute_file(const char* path, uint8_t digest[16]);
 void md5_digest_to_hex(const uint8_t digest[16], char hex[33]);
 
